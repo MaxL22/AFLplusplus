@@ -93,6 +93,13 @@ typedef enum {
 
 typedef enum {
 
+  INDIRECT_DEFAULT = 0,
+  INDIRECT_INSTRUMENT = 1,
+
+} instrument_indirect_jumps;
+
+typedef enum {
+
   UNSET = 0,
   LTO = 1,
   LLVM = 2,
@@ -174,7 +181,7 @@ typedef struct aflcc_state {
 
   u8 *lto_flag;
 
-  u8 instrument_mode, instrument_opt_mode, ngram_size, ctx_k;
+  u8 instrument_mode, instrument_opt_mode, ngram_size, ctx_k, instrument_indir;
 
   u8 cmplog_mode;
 
@@ -1170,9 +1177,10 @@ static void instrument_mode_new_environ(aflcc_state_t *aflcc) {
 */
 void instrument_mode_by_environ(aflcc_state_t *aflcc) {
 
+  // INDIRECTING
   if (getenv("AFL_LLVM_INSTRUMENT_FILE") || getenv("AFL_LLVM_WHITELIST") ||
       getenv("AFL_LLVM_ALLOWLIST") || getenv("AFL_LLVM_DENYLIST") ||
-      getenv("AFL_LLVM_BLOCKLIST")) {
+      getenv("AFL_LLVM_BLOCKLIST") || getenv("AFL_LLVM_INDIRECT")) {
 
     aflcc->have_instr_env = 1;
 
@@ -1441,6 +1449,11 @@ void mode_final_checkout(aflcc_state_t *aflcc, int argc, char **argv) {
   aflcc->cmplog_mode = getenv("AFL_CMPLOG") || getenv("AFL_LLVM_CMPLOG") ||
                        getenv("AFL_GCC_CMPLOG");
 
+  // INDIRECTING: Here is the getenv
+  if (getenv("AFL_LLVM_INDIRECT")) {
+    aflcc->instrument_indir = INDIRECT_INSTRUMENT;
+  }
+  
 }
 
 /*
@@ -2247,6 +2260,9 @@ void add_optimized_pcguard(aflcc_state_t *aflcc) {
     insert_param(aflcc, "-fexperimental-new-pass-manager");
       #endif
     #endif
+    //INDIRECTING
+    // The plugin is called here, what do I do?
+    // Should it be another plugin?
     insert_object(aflcc, "SanitizerCoveragePCGUARD.so", "-fpass-plugin=%s", 0);
 
   }
@@ -3798,8 +3814,16 @@ static void edit_params(aflcc_state_t *aflcc, u32 argc, char **argv,
 
     }
 
-  }
+    // INDIRECTING Here
+    // Da modificare quando effettivamente esisterà il pass?
+    // Esisterà un pass?
+    if (aflcc->instrument_indir) {
+      OKF("AFL_LLVM_INDIRECT is set");
+      // load_llvm_pass(aflcc, "afl-llvm-instr-pass.so");
+    }
 
+  }
+  
   /* Inspect the command line parameters. */
 
   process_params(aflcc, 0, argc, argv);
@@ -3905,6 +3929,13 @@ int main(int argc, char **argv, char **envp) {
 
   }
 
+  // INDIRECTING
+  // Idk if it's correct, surely there's a minimum LLVM version
+  // But idk what is (might be 4 for instrumentation, not checked here)
+  // if (aflcc->instrument_indir) {
+  //     WARNF("AFL_LLVM_INDIRECT support requires LLVM14+");
+  //     unsetenv("AFL_LLVM_INDIRECT");
+  // }
 #endif
 
   mode_notification(aflcc);
