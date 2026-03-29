@@ -142,6 +142,8 @@ class ModuleSanitizerCoverageAFL
   void            instrumentFunction(Function &F, DomTreeCallback DTCallback,
                                      PostDomTreeCallback PDTCallback);
   bool            InjectCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
+  // INDIRECTING: function def
+  bool            InjectIndirCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   GlobalVariable *CreateFunctionLocalArrayInSection(size_t    NumElements,
                                                     Function &F, Type *Ty,
                                                     const char *Section);
@@ -156,6 +158,8 @@ class ModuleSanitizerCoverageAFL
 
   // Helper functions for cleaner code
   bool   isInstructionInteresting(Instruction &IN);
+  // INDIRECTING: helper function definition
+  bool   isInstructionIndirInteresting(Instruction &IN);
   bool   isAflInterestingCall(Instruction &IN);
   void   initializeVersionSpecificTypes(IRBuilder<> &IRB);
   void   setupEnvironmentVariables();
@@ -171,6 +175,10 @@ class ModuleSanitizerCoverageAFL
                                 ArrayRef<BasicBlock *> AllBlocks);
   void   updateCoverageForSelect(IRBuilder<> &IRB, Value *result, Value *MapPtr,
                                  uint32_t &vector_cnt);
+  // INDIRECTING: new function header
+  // Dead code, for now, might be changed later
+  void   updateCoverageForTerminator(IRBuilder<> &IRB, Value *result, 
+                                     Value *MapPtr, uint32_t &vector_cnt);
   void   setNoInstrumentMetadata(Value *V);
 
   std::string     getSectionName(const std::string &Section) const;
@@ -192,7 +200,8 @@ class ModuleSanitizerCoverageAFL
 
   SanitizerCoverageOptions Options;
 
-  uint32_t instr = 0, selects = 0, unhandled = 0, skippedbb = 0, dump_cc = 0;
+  // INDIRECTING: added indir counter for blocks skipped and indir_enable
+  uint32_t instr = 0, selects = 0, unhandled = 0, skippedbb = 0, dump_cc = 0, indir = 0;
   GlobalVariable *AFLMapPtr = NULL;
   GlobalVariable *AFLCovMapSize = NULL;
   GlobalVariable *AFLIJONState = NULL;
@@ -200,6 +209,7 @@ class ModuleSanitizerCoverageAFL
   ConstantInt    *One = NULL;
   ConstantInt    *Zero = NULL;
   bool            deny_exec = false;
+  bool            indir_enable = true; // TODO: should probably be false by default
 
 };
 
@@ -324,6 +334,13 @@ bool ModuleSanitizerCoverageAFL::isInstructionInteresting(Instruction &I) {
 
 }
 
+// INDIRECTING: new helper function
+bool ModuleSanitizerCoverageAFL::isInstructionIndirInteresting(Instruction &I) {
+
+  return isAflCovInterestingIndirInstruction(I);
+
+}
+
 bool ModuleSanitizerCoverageAFL::isAflInterestingCall(Instruction &IN) {
 
   CallInst *callInst = dyn_cast<CallInst>(&IN);
@@ -377,6 +394,8 @@ void ModuleSanitizerCoverageAFL::setupEnvironmentVariables() {
   ijon_enabled = getenv("AFL_LLVM_IJON");
   if (getenv("AFL_LLVM_DENY_EXEC")) { deny_exec = true; }
 
+  //INDIRECTING: parsing of env var
+  if (getenv("AFL_LLVM_INDIRECT")) { indir_enable = true; }
 }
 
 Value *ModuleSanitizerCoverageAFL::createGuardPointer(IRBuilder<> &IRB,
@@ -562,6 +581,24 @@ void ModuleSanitizerCoverageAFL::updateCoverageForSelect(IRBuilder<> &IRB,
 
 }
 
+// INDIRECTING: new function
+void ModuleSanitizerCoverageAFL::updateCoverageForTerminator(IRBuilder<> &IRB,
+                                                             Value *result,
+                                                             Value *MapPtr,
+                                                             uint32_t &vector_cnt) {
+
+  LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), result);
+  setNoSanitizeMetadata(CurLoc); // Prevent ASAN/MSAN from instrumenting
+  Value *CoverageIndex = CurLoc;
+
+  // TODO: add IJON stuff
+  // (probably I should first understand what IJON is)
+  
+  // Memory update
+  updateCoverageBitmap(IRB, CoverageIndex, MapPtr);
+  vector_cnt = 1;
+}
+
 void ModuleSanitizerCoverageAFL::setupIJONSymbols(Module &M,
                                                   bool    uses_ijon_state) {
 
@@ -724,6 +761,10 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
       OKF("Instrumented %u locations with no collisions (%s mode) of which are "
           "%u handled and %u unhandled special instructions.%s",
           instr, modeline, selects, unhandled, buf);
+      // INDIRECTING; new print for indir stuff
+      if (indir_enable) {
+        OKF("Instrumented %u indirect locations I guess", indir);
+      }
 
       if (getenv("AFL_LLVM_IJON")) {
 
@@ -887,6 +928,9 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
   }
 
   InjectCoverage(F, BlocksToInstrument);
+  
+  //INDIRECTING
+  if (indir_enable) {InjectIndirCoverage(F, BlocksToInstrument);}
 
   if (dump_cc) { calcCyclomaticComplexity(&F); }
 
@@ -936,6 +980,57 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
     FunctionGuardArray = CreateFunctionLocalArrayInSection(
         AllBlocks.size() + special, F, Int32Ty, SanCovGuardsSectionName);
 
+}
+
+//INDIRECTING: injectIndirCoverage definition
+bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
+  Function&F, ArrayRef<BasicBlock *> AllBlocks) {
+
+  // idk tbf
+  if (AllBlocks.empty()) return false;
+
+  uint32_t cnt_cov = 0, cnt_sel = 0, cnt_sel_inc = 0, skip_blocks = 0,
+           cnt_special = 0;
+  
+  for (auto &BB: F) {
+
+    bool block_is_instrumented = false;
+    
+    for (auto &IN: BB) {
+      // TODO
+      //  Should check dlopen stuff? (What is it?)
+      //  Check other stuff InjectCoverage is doing (I ain't doing all that?)
+      //  IRBuilder, inject callback?
+      
+      bool instrumentInst = isInstructionIndirInteresting(IN);
+
+      if (instrumentInst)
+        indir++;
+
+      // This is "old" code
+      // if (instrumentInst) {
+
+      //   IndirectBrInst    *ibr = dyn_cast<IndirectBrInst>(&IN);
+      //   CallBase          *call= dyn_cast<CallBase>(&IN);
+
+      //   if (ibr) {
+
+      //     cnt_sel++; // Number of special instructions
+      //     // How many guards there will actually be (1 in this case)
+      //     cnt_sel_inc++;
+          
+      //   } else if (call) {
+
+      //     cnt_sel++;
+      //     cnt_sel_inc++;
+        
+      //   }         
+      // }
+      
+    }
+  }
+
+  return true;
 }
 
 bool ModuleSanitizerCoverageAFL::InjectCoverage(
@@ -1161,7 +1256,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       bool instrumentInst = isInstructionInteresting(IN);
 
       if (instrumentInst) {
-
+       
         Value      *result = nullptr;
         uint32_t    vector_cnt = 0;
         SelectInst *selectInst;

@@ -51,6 +51,8 @@ unsigned long long int calculateCollisions(uint32_t edges);
 void                   scanForDangerousFunctions(llvm::Module *M);
 unsigned int           calcCyclomaticComplexity(llvm::Function *F);
 bool                   isAflCovInterestingInstruction(llvm::Instruction &I);
+// INDIRECTING
+bool                   isAflCovInterestingIndirInstruction(llvm::Instruction &I);
 bool                   isDecisionUse(const llvm::Value *Cond);
 bool                   isExecCall(llvm::Instruction *IN);
 std::pair<bool, bool>  detectIJONUsage(llvm::Module &M);

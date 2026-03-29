@@ -763,6 +763,37 @@ bool isAflCovInterestingInstruction(Instruction &I) {
 
 }
 
+// INDIRECTING: custom whitelist function
+bool isAflCovInterestingIndirInstruction(Instruction &I) {
+
+  switch (I.getOpcode()) {
+    //  add cases for `indirectbr` and `call`, when to pointer
+    //  Should not need any fancy stuff for `indirectbr` (it's in the name)
+    case Instruction::IndirectBr:
+      return true;
+    // Now I need to get calls to function pointers
+    // This should match all indirect function calls
+    case Instruction::Call:
+    case Instruction::Invoke:
+    case Instruction::CallBr: {
+      // OKF("I found something interesting! %s", I.getOpcodeName());
+      CallBase &call = cast<CallBase>(I);
+      if (call.isIndirectCall())
+        return true;
+
+      return false;
+
+    }
+    // Switch do not need to be tracked,
+    // they ARE indirect, but dummy blocks for tracking can be injected
+    
+    default:
+      return false;
+
+  }
+
+}
+
 bool isExecCall(llvm::Instruction *IN) {
 
   llvm::CallInst *callInst = llvm::dyn_cast<llvm::CallInst>(IN);
