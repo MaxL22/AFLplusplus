@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <cstdint>
 #if defined(__clang__)
   #pragma clang diagnostic push
   #pragma clang diagnostic ignored "-Wdeprecated-copy-with-dtor"
@@ -143,7 +144,7 @@ class ModuleSanitizerCoverageAFL
                                      PostDomTreeCallback PDTCallback);
   bool            InjectCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   // INDIRECTING: function def
-  bool            InjectIndirCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
+  bool            InjectIndirCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks, uint32_t BaseIdx);
   GlobalVariable *CreateFunctionLocalArrayInSection(size_t    NumElements,
                                                     Function &F, Type *Ty,
                                                     const char *Section);
@@ -200,8 +201,13 @@ class ModuleSanitizerCoverageAFL
 
   SanitizerCoverageOptions Options;
 
-  // INDIRECTING: added indir counter for blocks skipped and indir_enable
-  uint32_t instr = 0, selects = 0, unhandled = 0, skippedbb = 0, dump_cc = 0, indir = 0;
+  // INDIRECTING: added indir counter for number of indir instr
+  // added id_counter to keep track of the guard values
+  // added indir_enable to enable/disable indir instrumentation
+  uint32_t indir = 0, id_counter = 0;
+  bool            indir_enable = true; // TODO: should probably be false by default
+
+  uint32_t instr = 0, selects = 0, unhandled = 0, skippedbb = 0, dump_cc = 0;
   GlobalVariable *AFLMapPtr = NULL;
   GlobalVariable *AFLCovMapSize = NULL;
   GlobalVariable *AFLIJONState = NULL;
@@ -209,7 +215,6 @@ class ModuleSanitizerCoverageAFL
   ConstantInt    *One = NULL;
   ConstantInt    *Zero = NULL;
   bool            deny_exec = false;
-  bool            indir_enable = true; // TODO: should probably be false by default
 
 };
 
@@ -930,7 +935,7 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
   InjectCoverage(F, BlocksToInstrument);
   
   //INDIRECTING
-  if (indir_enable) {InjectIndirCoverage(F, BlocksToInstrument);}
+  if (indir_enable) {InjectIndirCoverage(F, BlocksToInstrument, id_counter);}
 
   if (dump_cc) { calcCyclomaticComplexity(&F); }
 
@@ -984,14 +989,22 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 
 //INDIRECTING: injectIndirCoverage definition
 bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
-  Function&F, ArrayRef<BasicBlock *> AllBlocks) {
+  Function&F, ArrayRef<BasicBlock *> AllBlocks, uint32_t BaseIdx) {
+
+  // Define the types we need for the function signature: void(i32, i32, i64)
+  Type *VoidTy = Type::getVoidTy(*C);
+  // Declare the external callback function
+  FunctionCallee TraceIndirCb = F.getParent()->getOrInsertFunction(
+    "__afl_trace_indir", 
+    VoidTy,    // Return type
+    Int32Ty,   // Arg 1: indir_val
+    Int32Ty,   // Arg 2: guard_val
+    IntptrTy   // Arg 3: target_addr
+    );
 
   // idk tbf
   if (AllBlocks.empty()) return false;
 
-  uint32_t cnt_cov = 0, cnt_sel = 0, cnt_sel_inc = 0, skip_blocks = 0,
-           cnt_special = 0;
-  
   for (auto &BB: F) {
 
     bool block_is_instrumented = false;
@@ -1004,28 +1017,39 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
       
       bool instrumentInst = isInstructionIndirInteresting(IN);
 
-      if (instrumentInst)
+      if (instrumentInst) {
+        // Counter
         indir++;
 
-      // This is "old" code
-      // if (instrumentInst) {
+        IndirectBrInst    *ibr = dyn_cast<IndirectBrInst>(&IN);
+        CallBase          *call= dyn_cast<CallBase>(&IN);
 
-      //   IndirectBrInst    *ibr = dyn_cast<IndirectBrInst>(&IN);
-      //   CallBase          *call= dyn_cast<CallBase>(&IN);
+        IRBuilder<> IRB(&IN);
 
-      //   if (ibr) {
+        // Get guard pointer
+        Value *GuardPtr = createGuardPointer(IRB, BaseIdx + indir);
+        LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), GuardPtr);
+        setNoSanitizeMetadata(CurLoc); 
+        Value *CoverageIndex = CurLoc;
+        Value *TargetPtr, *TargetAddrInt;
 
-      //     cnt_sel++; // Number of special instructions
-      //     // How many guards there will actually be (1 in this case)
-      //     cnt_sel_inc++;
+        // Get target address
+        if (ibr) {
+          TargetPtr = ibr->getAddress();
+          TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
           
-      //   } else if (call) {
+        } else if (call) {
 
-      //     cnt_sel++;
-      //     cnt_sel_inc++;
+          TargetPtr = call->getCalledOperand();
+          TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
+          
+        }
+
+        // load indir value
+        Value *IndirValId = ConstantInt::get(Int32Ty, indir);
+        IRB.CreateCall(TraceIndirCb, {IndirValId, CoverageIndex, TargetAddrInt});
         
-      //   }         
-      // }
+      }
       
     }
   }
@@ -1190,10 +1214,23 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
   }
 
+  //INDIRECTING: we need to count indir instruction
+  // for the allocation of the guard values
+  uint32_t cnt_indir = 0;
+  if (indir_enable) {
+    for (auto &BB : F) {
+      for (auto &IN : BB) {
+        if (isInstructionIndirInteresting(IN)) {
+          cnt_indir++;
+        }
+      }
+    }
+  }
+  // Added cnt_indir
   uint32_t xtra = 0;
   if (skip_blocks < first + cnt_cov + cnt_sel_inc + cnt_special) {
 
-    xtra = first + cnt_cov + cnt_sel_inc + cnt_special - skip_blocks;
+    xtra = first + cnt_cov + cnt_sel_inc + cnt_special + cnt_indir - skip_blocks;
 
   }
 
@@ -1459,10 +1496,12 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       }
 
     }
-
   }
 
   skippedbb += skipped;
+
+  //INDIRECTING: export base idx for injecting indir coverage
+  id_counter = cnt_cov + special + local_selects + AllBlocks.size() - skip_blocks;
 
   return true;
 
