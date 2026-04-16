@@ -10,7 +10,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <cstdint>
 #if defined(__clang__)
   #pragma clang diagnostic push
   #pragma clang diagnostic ignored "-Wdeprecated-copy-with-dtor"
@@ -991,24 +990,23 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
   Function&F, ArrayRef<BasicBlock *> AllBlocks, uint32_t BaseIdx) {
 
-  // Define the types we need for the function signature: void(i32, i32, i64)
+  // Define the types we need for the function signature: void(i32, i64)
   Type *VoidTy = Type::getVoidTy(*C);
   // Declare the external callback function
   FunctionCallee TraceIndirCb = F.getParent()->getOrInsertFunction(
     "__afl_trace_indir", 
     VoidTy,    // Return type
-    Int32Ty,   // Arg 1: indir_val
-    Int32Ty,   // Arg 2: guard_val
-    IntptrTy   // Arg 3: target_addr
+    Int32PtrTy,   // Arg 1: guard_val
+    IntptrTy   // Arg 2: target_addr
     );
 
   // idk tbf
   if (AllBlocks.empty()) return false;
 
+  uint32_t local_indir = 0;
+  
   for (auto &BB: F) {
-
-    bool block_is_instrumented = false;
-    
+  
     for (auto &IN: BB) {
       // TODO
       //  Should check dlopen stuff? (What is it?)
@@ -1027,27 +1025,25 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
         IRBuilder<> IRB(&IN);
 
         // Get guard pointer
-        Value *GuardPtr = createGuardPointer(IRB, BaseIdx + indir);
-        LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), GuardPtr);
-        setNoSanitizeMetadata(CurLoc); 
-        Value *CoverageIndex = CurLoc;
-        Value *TargetPtr, *TargetAddrInt;
+        Value *GuardPtr = createGuardPointer(IRB, BaseIdx + local_indir++);
+        // LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), GuardPtr);
+        // setNoSanitizeMetadata(CurLoc); 
+        // Value *CoverageIndex = CurLoc;
+        Value *TargetPtr = NULL;
 
         // Get target address
         if (ibr) {
+
           TargetPtr = ibr->getAddress();
-          TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
           
         } else if (call) {
 
           TargetPtr = call->getCalledOperand();
-          TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
           
         }
 
-        // load indir value
-        Value *IndirValId = ConstantInt::get(Int32Ty, indir);
-        IRB.CreateCall(TraceIndirCb, {IndirValId, CoverageIndex, TargetAddrInt});
+        Value *TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
+        IRB.CreateCall(TraceIndirCb, {GuardPtr, TargetAddrInt});
         
       }
       
