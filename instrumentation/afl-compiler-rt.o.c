@@ -3693,7 +3693,7 @@ static int atexit_registered = 0;
 void dump_indir_trace_to_file() {
     if (trace_count == 0) return;
 
-    FILE *f = fopen("indir_log.txt", "a");
+    FILE *f = fopen("/tmp/indir_log.txt", "a");
     if (!f) return;
 
     for (uint32_t i = 0; i < trace_count; i++) {
