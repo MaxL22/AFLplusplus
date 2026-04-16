@@ -13,6 +13,7 @@
 
 */
 
+#include <linux/limits.h>
 #ifdef __linux__
   #ifndef _GNU_SOURCE
     #define _GNU_SOURCE
@@ -3675,13 +3676,13 @@ uint32_t ijon_memdist(char *a, char *b, size_t len) {
 
 //INDIRECTING: callback definition
 typedef struct {
-    uint32_t indir_val;
+    uint64_t site_id;
     uint32_t guard_val;
     uint64_t target_addr;
 } IndirTraceEntry;
 
 // Memory buffer: max size for each execution
-// This is 1000000 * 16 ~ 16MB
+// This is 1000000 * 20 ~ 20MB
 #define MAX_TRACE_ENTRIES 1000000
 static IndirTraceEntry trace_buffer[MAX_TRACE_ENTRIES];
 
@@ -3693,22 +3694,27 @@ static int atexit_registered = 0;
 void dump_indir_trace_to_file() {
     if (trace_count == 0) return;
 
-    FILE *f = fopen("/tmp/indir_log.txt", "a");
+    // const char* out_dir = (getenv("MY_AFL_OUT_DIR")) ? getenv("MY_AFL_OUT_DIR") : "/out";
+    char filepath[PATH_MAX];
+    // snprintf(filepath, sizeof(filepath), "%s/indir_log.txt", out_dir);
+    snprintf(filepath, sizeof(filepath), "indir_log.txt");
+    
+    FILE *f = fopen(filepath, "a");
+
     if (!f) return;
 
     for (uint32_t i = 0; i < trace_count; i++) {
-        fprintf(f, "%u, %u, 0x%llx\n", 
-                trace_buffer[i].indir_val, 
-                trace_buffer[i].guard_val, 
-                (unsigned long long)trace_buffer[i].target_addr);
-    }
+      fprintf(f, "0x%016llx, %u, 0x%llx\n",
+                (unsigned long long)trace_buffer[i].site_id,
+                trace_buffer[i].guard_val,
+                (unsigned long long)trace_buffer[i].target_addr);    }
 
     fprintf(f, "\n");
     fclose(f);
 }
 
 // actual callback
-void __afl_trace_indir(uint32_t indir_val, uint32_t guard_val, uint64_t target_addr) {
+void __afl_trace_indir(uint64_t site_id, uint32_t guard_val, uint64_t target_addr) {
 
     // atexit runs the function ... atexit
     if (!atexit_registered) {
@@ -3717,7 +3723,7 @@ void __afl_trace_indir(uint32_t indir_val, uint32_t guard_val, uint64_t target_a
     }
 
     if (trace_count < MAX_TRACE_ENTRIES) {
-        trace_buffer[trace_count].indir_val = indir_val;
+        trace_buffer[trace_count].site_id = site_id;
         trace_buffer[trace_count].guard_val = guard_val;
         trace_buffer[trace_count].target_addr = target_addr;
         trace_count++;

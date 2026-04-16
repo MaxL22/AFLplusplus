@@ -21,6 +21,7 @@
 #endif
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
@@ -997,18 +998,21 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
   FunctionCallee TraceIndirCb = F.getParent()->getOrInsertFunction(
     "__afl_trace_indir", 
     VoidTy,    // Return type
-    Int32Ty,   // Arg 1: indir_val
+    Int64Ty,   // Arg 1: hash
     Int32Ty,   // Arg 2: guard_val
     IntptrTy   // Arg 3: target_addr
     );
 
-  // idk tbf
+  uint32_t local_indir = 0;
+
+  // First part of the hash: module and function name, precomputed
+  llvm::hash_code ModHash  = llvm::hash_value(F.getParent()->getName());
+  llvm::hash_code FuncHash = llvm::hash_value(F.getName());
+  
   if (AllBlocks.empty()) return false;
 
   for (auto &BB: F) {
 
-    bool block_is_instrumented = false;
-    
     for (auto &IN: BB) {
       // TODO
       //  Should check dlopen stuff? (What is it?)
@@ -1020,33 +1024,36 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
       if (instrumentInst) {
         // Counter
         indir++;
+        local_indir++;
 
         IndirectBrInst    *ibr = dyn_cast<IndirectBrInst>(&IN);
         CallBase          *call= dyn_cast<CallBase>(&IN);
 
+        // Complete hash with local indir value
+        uint64_t SiteId = (uint64_t)llvm::hash_combine(ModHash, FuncHash,
+                                                      (uint64_t)local_indir);
+        
         IRBuilder<> IRB(&IN);
 
         // Get guard pointer
-        Value *GuardPtr = createGuardPointer(IRB, BaseIdx + indir);
+        Value *GuardPtr = createGuardPointer(IRB, BaseIdx + local_indir);
         LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), GuardPtr);
         setNoSanitizeMetadata(CurLoc); 
         Value *CoverageIndex = CurLoc;
-        Value *TargetPtr, *TargetAddrInt;
-
+        
+        Value *TargetAddrInt;
         // Get target address
         if (ibr) {
-          TargetPtr = ibr->getAddress();
-          TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
-          
+          TargetAddrInt = IRB.CreatePtrToInt(ibr->getAddress(), IntptrTy);
         } else if (call) {
-
-          TargetPtr = call->getCalledOperand();
-          TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
-          
+          TargetAddrInt = IRB.CreatePtrToInt(call->getCalledOperand(), IntptrTy);
+        } else {
+          // This should be unreachable
+          llvm_unreachable("InjectIndirCoverage: unexpected indirect instruction type");
         }
 
         // load indir value
-        Value *IndirValId = ConstantInt::get(Int32Ty, indir);
+        Value *IndirValId = ConstantInt::get(Int64Ty, SiteId);
         IRB.CreateCall(TraceIndirCb, {IndirValId, CoverageIndex, TargetAddrInt});
         
       }
@@ -1501,7 +1508,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   skippedbb += skipped;
 
   //INDIRECTING: export base idx for injecting indir coverage
-  id_counter = cnt_cov + special + local_selects + AllBlocks.size() - skip_blocks;
+  id_counter = first + cnt_cov + special + local_selects + AllBlocks.size() - skip_blocks;
 
   return true;
 
