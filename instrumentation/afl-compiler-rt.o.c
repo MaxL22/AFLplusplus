@@ -13,13 +13,16 @@
 
 */
 
-#include <linux/limits.h>
 #ifdef __linux__
   #ifndef _GNU_SOURCE
     #define _GNU_SOURCE
   #endif
   #include <link.h>
 #endif
+
+#include <linux/limits.h>
+#include <stdatomic.h>
+#include <sys/file.h>
 
 #ifdef __AFL_CODE_COVERAGE
   #ifndef _GNU_SOURCE
@@ -3674,7 +3677,7 @@ uint32_t ijon_memdist(char *a, char *b, size_t len) {
 
 }
 
-//INDIRECTING: callback definition
+//INDIR_CHANGE: callback definition
 typedef struct {
     uint64_t site_id;
     uint32_t guard_val;
@@ -3686,46 +3689,61 @@ typedef struct {
 #define MAX_TRACE_ENTRIES 1000000
 static IndirTraceEntry trace_buffer[MAX_TRACE_ENTRIES];
 
-static uint32_t trace_count = 0;
-static int atexit_registered = 0;
+static _Atomic uint32_t trace_count = 0;
+static _Atomic int atexit_registered = 0;
 
 // handles exit and dumps to file
 // it's run once at the end of the program
 void dump_indir_trace_to_file() {
-    if (trace_count == 0) return;
+    uint32_t count = atomic_load(&trace_count);
+    if (count == 0) return;
 
-    // const char* out_dir = (getenv("MY_AFL_OUT_DIR")) ? getenv("MY_AFL_OUT_DIR") : "/out";
+    const char* out_dir = (getenv("OUT")) ? getenv("OUT") : "/tmp";
     char filepath[PATH_MAX];
-    // snprintf(filepath, sizeof(filepath), "%s/indir_log.txt", out_dir);
-    snprintf(filepath, sizeof(filepath), "indir_log.txt");
+    snprintf(filepath, sizeof(filepath), "%s/indir_log.txt", out_dir);
     
-    FILE *f = fopen(filepath, "a");
+    int fd = open(filepath, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) return;
 
-    if (!f) return;
-
-    for (uint32_t i = 0; i < trace_count; i++) {
-      fprintf(f, "0x%016llx, %u, 0x%llx\n",
+    if (flock(fd, LOCK_EX) != 0) {
+        close(fd);
+        return;
+    }
+    
+    for (uint32_t i = 0; i < count; i++) {
+      char line_buf[256];
+        
+      int len = snprintf(line_buf, sizeof(line_buf), "0x%016llx, %u, 0x%llx\n",
                 (unsigned long long)trace_buffer[i].site_id,
                 trace_buffer[i].guard_val,
-                (unsigned long long)trace_buffer[i].target_addr);    }
+                (unsigned long long)trace_buffer[i].target_addr);
+        if (len > 0 && len < sizeof(line_buf)) {
+            write(fd, line_buf, len);
+        }
+    }
 
-    fprintf(f, "\n");
-    fclose(f);
+    write(fd, "\n", 1);
+
+    flock(fd, LOCK_UN);
+    close(fd);
 }
 
 // actual callback
-void __afl_trace_indir(uint64_t site_id, uint32_t guard_val, uint64_t target_addr) {
+__attribute__((nothrow))
+  void __afl_trace_indir(uint64_t site_id, uint32_t guard_val, uint64_t target_addr) {
 
     // atexit runs the function ... atexit
-    if (!atexit_registered) {
+    // It's handled atomically; has to be, right?
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&atexit_registered, &expected, 1)) {
         atexit(dump_indir_trace_to_file);
-        atexit_registered = 1;
     }
 
-    if (trace_count < MAX_TRACE_ENTRIES) {
-        trace_buffer[trace_count].site_id = site_id;
-        trace_buffer[trace_count].guard_val = guard_val;
-        trace_buffer[trace_count].target_addr = target_addr;
-        trace_count++;
-    } 
+    // atomic add; drops if over the limit
+    uint32_t slot = atomic_fetch_add(&trace_count, 1);
+    if (slot < MAX_TRACE_ENTRIES) {
+        trace_buffer[slot].site_id      = site_id;
+        trace_buffer[slot].guard_val    = guard_val;
+        trace_buffer[slot].target_addr  = target_addr;
+    }
 }

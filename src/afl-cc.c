@@ -1177,7 +1177,7 @@ static void instrument_mode_new_environ(aflcc_state_t *aflcc) {
 */
 void instrument_mode_by_environ(aflcc_state_t *aflcc) {
 
-  // INDIRECTING
+  // INDIR_CHANGE
   if (getenv("AFL_LLVM_INSTRUMENT_FILE") || getenv("AFL_LLVM_WHITELIST") ||
       getenv("AFL_LLVM_ALLOWLIST") || getenv("AFL_LLVM_DENYLIST") ||
       getenv("AFL_LLVM_BLOCKLIST") || getenv("AFL_LLVM_INDIRECT")) {
@@ -1449,7 +1449,7 @@ void mode_final_checkout(aflcc_state_t *aflcc, int argc, char **argv) {
   aflcc->cmplog_mode = getenv("AFL_CMPLOG") || getenv("AFL_LLVM_CMPLOG") ||
                        getenv("AFL_GCC_CMPLOG");
 
-  // INDIRECTING: Here is the getenv
+  // INDIR_CHANGE: Here is the getenv
   if (getenv("AFL_LLVM_INDIRECT")) {
     aflcc->instrument_indir = INDIRECT_INSTRUMENT;
   }
@@ -2260,7 +2260,7 @@ void add_optimized_pcguard(aflcc_state_t *aflcc) {
     insert_param(aflcc, "-fexperimental-new-pass-manager");
       #endif
     #endif
-    //INDIRECTING
+    //INDIR_CHANGE
     // The plugin is called here, what do I do?
     // Should it be another plugin?
     insert_object(aflcc, "SanitizerCoveragePCGUARD.so", "-fpass-plugin=%s", 0);
@@ -3814,7 +3814,7 @@ static void edit_params(aflcc_state_t *aflcc, u32 argc, char **argv,
 
     }
 
-    // INDIRECTING Here
+    // INDIR_CHANGE Here
     // Da modificare quando effettivamente esisterà il pass?
     // Esisterà un pass?
     if (aflcc->instrument_indir) {
@@ -3929,7 +3929,7 @@ int main(int argc, char **argv, char **envp) {
 
   }
 
-  // INDIRECTING
+  // INDIR_CHANGE
   // Idk if it's correct, surely there's a minimum LLVM version
   // But idk what is (might be 4 for instrumentation, not checked here)
   // if (aflcc->instrument_indir) {

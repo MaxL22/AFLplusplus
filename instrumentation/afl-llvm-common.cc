@@ -763,7 +763,7 @@ bool isAflCovInterestingInstruction(Instruction &I) {
 
 }
 
-// INDIRECTING: custom whitelist function
+// INDIR_CHANGE: custom whitelist function
 bool isAflCovInterestingIndirInstruction(Instruction &I) {
 
   switch (I.getOpcode()) {
