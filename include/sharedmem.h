@@ -56,6 +56,20 @@ typedef struct sharedmem {
   int             sanfuzz_mode;
   int             shmemfuzz_mode;
   struct cmp_map *cmp_map;
+  //INDIR_CHANGE
+  int             indir_mode;
+
+  //INDIR_CHANGE
+  // map pointer
+  u8 *indir_map;
+  #ifdef USEMMAP
+    // mmap variables
+    int  indir_g_shm_fd;
+    char indir_g_shm_file_path[L_tmpnam];
+  #else
+    // SysV shm vars, for `shmget`
+    int  indir_shm_id;
+  #endif
 
 } sharedmem_t;
 

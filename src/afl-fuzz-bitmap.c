@@ -96,6 +96,13 @@ void write_bitmap(afl_state_t *afl) {
 
   ck_write(fd, afl->virgin_bits, afl->fsrv.map_size, fname);
 
+  // INDIR_CHANGE
+  // Write the bitmap to resume
+  // It is currently NOT fully implemented
+  if (afl->shm.indir_mode) {
+    ck_write(fd, afl->indir_virgin_bits, INDIR_SHMEM_SIZE, fname);
+  }
+
   close(fd);
 
 }
@@ -135,6 +142,20 @@ u32 count_bits(afl_state_t *afl, u8 *mem) {
 
   return ret;
 
+}
+
+// INDIR_CHANGE
+u32 count_indir_bits(afl_state_t *afl) {
+  u32 *ptr = (u32 *)afl->indir_virgin_bits;
+  u32 i = (INDIR_SHMEM_SIZE >> 2);
+  u32 ret = 0;
+
+  // Counting zeros: we have the virgin map, bits are set to zero as they are discovered
+  while (i--) {
+    u32 v = *(ptr++);
+    ret += __builtin_popcount(~v); 
+  }
+  return ret;
 }
 
 /* Count the number of bytes set in the bitmap. Called fairly sporadically,
@@ -249,6 +270,43 @@ inline u8 has_new_bits(afl_state_t *afl, u8 *virgin_map) {
 
   return ret;
 
+}
+
+// INDIR_CHANGE
+// Returns 1 if new coverage is found, 0 otherwise
+// This is kind of a copy of the one above
+inline u8 has_indir_new_bits(afl_state_t *afl) {
+
+#ifdef WORD_SIZE_64
+  u64 *current = (u64 *)afl->fsrv.indir_bits;
+  u64 *virgin  = (u64 *)afl->indir_virgin_bits;
+  u32 i = (INDIR_SHMEM_SIZE >> 3); // divide by 8
+#else
+  u32 *current = (u32 *)afl->fsrv.indir_bits;
+  u32 *virgin  = (u32 *)afl->indir_virgin_bits;
+  u32 i = (INDIR_SHMEM_SIZE >> 2); // divide by 4
+#endif
+
+  u8 ret = 0;
+
+  while (i--) {
+    if (unlikely(*current)) {
+      if (unlikely(*current & *virgin)) {
+        
+        ret = 1;
+        *virgin &= ~(*current);
+      }
+    }
+    
+    current++;
+    virgin++;
+  }
+
+  if (unlikely(ret)) {
+    afl->bitmap_changed = 1;
+  }
+
+  return ret;
 }
 
 /* A combination of classify_counts and has_new_bits. If 0 is returned, then the
@@ -678,6 +736,11 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
        future fuzzing, etc. */
     calculate_new_bits_if_necessary(afl, &new_bits, &bits_counted, &classified);
 
+    // INDIR_CHANGE: check the coverage
+    if (has_indir_new_bits(afl)) {
+          new_bits = 2;
+    }
+    
     if (likely(!new_bits)) {
 
       if (san_fault == FSRV_RUN_OK) {

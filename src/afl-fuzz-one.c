@@ -454,9 +454,11 @@ u8 fuzz_one_original(afl_state_t *afl) {
               ? (double)afl->fs_stats.total_time_ms / total_runtime_ms * 100.0
               : 0.0;
 
+      // INDIR_CHANGE
+      // Added the number of indir calls found
       ACTF(
           "Fuzzing test case #%u (%u total, %s%llu crashes saved%s, state: %s, "
-          "mode=%s, "
+          "mode=%s, icalls=%d, "
           "perf_score=%0.0f, weight=%0.0f, favorite=%u, was_fuzzed=%u, "
           "exec_us=%llu, hits=%u, map=%u, ascii=%u, run_time=%s, cvg=%.02f%%) "
           "FS (t=%s "
@@ -464,7 +466,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
           "st=%llu, avg=%llu ms, found=%u/%u)...",
           afl->current_entry, afl->queued_items,
           afl->saved_crashes != 0 ? cRED : "", afl->saved_crashes, cRST,
-          get_fuzzing_state(afl), afl->fuzz_mode ? "exploit" : "explore",
+          get_fuzzing_state(afl), afl->fuzz_mode ? "exploit" : "explore", count_indir_bits(afl),
           afl->queue_cur->perf_score, afl->queue_cur->weight,
           afl->queue_cur->favored, afl->queue_cur->was_fuzzed,
           afl->queue_cur->exec_us,

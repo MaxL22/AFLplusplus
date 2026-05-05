@@ -1141,10 +1141,15 @@ void show_stats_normal(afl_state_t *afl) {
           ((double)afl->current_entry * 100) / afl->queued_items);
 
   SAYF(bV bSTOP "  now processing : " cRST "%-18s " bSTG bV bSTOP, tmp);
-
-  sprintf(tmp, "%0.02f%% / %0.02f%%",
+                                    
+  // INDIR_CHANGE: removed old sprintf() to add the indir count
+  // sprintf(tmp, "%0.02f%% / %0.02f%%",
+  //         ((double)afl->queue_cur->bitmap_size) * 100 / afl->fsrv.real_map_size,
+  //         t_byte_ratio);
+  u32 indir_count = count_indir_bits(afl);
+  sprintf(tmp, "%0.1f%%/%0.1f%% i:%u",
           ((double)afl->queue_cur->bitmap_size) * 100 / afl->fsrv.real_map_size,
-          t_byte_ratio);
+          t_byte_ratio, indir_count);
 
   SAYF("    map density : %s%-19s" bSTG bV "\n",
        t_byte_ratio > 70

@@ -107,6 +107,9 @@ typedef struct afl_forkserver {
   /* a program that includes afl-forkserver needs to define these */
 
   u8 *trace_bits;                       /* SHM with instrumentation bitmap  */
+  //INDIR_CHANGE: new pointer, new map
+  u8 *indir_bits;
+  bool indir_mode;
 
   s32 fsrv_pid,                         /* PID of the fork server           */
       child_pid,                        /* PID of the fuzzed program        */

@@ -128,9 +128,28 @@ void afl_shm_deinit(sharedmem_t *shm) {
 
   }
 
+  // INDIR_CHANGE
+  if (shm->indir_mode) {
+    unsetenv(INDIR_SHM_ENV_VAR);
+    if (shm->indir_map != NULL) {
+      munmap(shm->indir_map, INDIR_SHMEM_SIZE);
+      shm->indir_map = NULL;
+    }
+    if (shm->indir_g_shm_fd != -1) {
+      close(shm->indir_g_shm_fd);
+      shm->indir_g_shm_fd = -1;
+    }
+    if (shm->indir_g_shm_file_path[0]) {
+      shm_unlink(shm->indir_g_shm_file_path);
+      shm->indir_g_shm_file_path[0] = 0;
+    }
+  }
+
 #else
   shmctl(shm->shm_id, IPC_RMID, NULL);
   if (shm->cmplog_mode) { shmctl(shm->cmplog_shm_id, IPC_RMID, NULL); }
+  //INDIR_CHANGE
+  if (shm->indir_mode) { shmctl(shm->indir_shm_id, IPC_RMID, NULL); }
 #endif
 
   shm->map = NULL;
@@ -150,10 +169,15 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
   shm->map = NULL;
   shm->cmp_map = NULL;
 
+  //INDIR_CHANGE: initialization
+  shm->indir_map = NULL;
+  
 #ifdef USEMMAP
 
   shm->g_shm_fd = -1;
   shm->cmplog_g_shm_fd = -1;
+  //INDIR_CHANGE: fd to -1
+  shm->indir_g_shm_fd = -1;
 
   const int shmflags = O_RDWR | O_EXCL;
 
@@ -252,7 +276,7 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
     if (shm->cmplog_g_shm_fd == -1) { PFATAL("shm_open() failed"); }
     if (gid != -1) {
 
-      if (fchown(shm->g_shm_fd, -1, gid) == -1) { PFATAL("fchown() failed"); }
+      if (fchown(shm->cmplog_g_shm_fd, -1, gid) == -1) { PFATAL("fchown() failed"); }
 
     }
 
@@ -287,6 +311,37 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
     if (shm->cmp_map == (void *)-1 || !shm->cmp_map)
       PFATAL("cmplog mmap() failed");
 
+  }
+
+  // INDIR_CHANGE
+  if (shm->indir_mode) {
+  snprintf(shm->indir_g_shm_file_path, L_tmpnam, "/afl_indir_%d_%ld",
+           getpid(), random());
+  /* create the shared memory segment as if it was a file */
+  shm->indir_g_shm_fd = shm_open(shm->indir_g_shm_file_path,
+                                  O_CREAT | O_RDWR | O_EXCL, permission);
+  if (shm->indir_g_shm_fd == -1) { PFATAL("shm_open() failed"); }
+  if (gid != -1) {
+    if (fchown(shm->indir_g_shm_fd, -1, gid) == -1) { PFATAL("fchown() failed"); }
+  }
+  /* configure the size of the shared memory segment */
+  if (ftruncate(shm->indir_g_shm_fd, INDIR_SHMEM_SIZE)) {
+    PFATAL("setup_shm(): indir ftruncate() failed");
+  }
+  /* map the shared memory segment to the address space of the process */
+  shm->indir_map = mmap(0, INDIR_SHMEM_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, shm->indir_g_shm_fd, 0);
+  if (shm->indir_map == MAP_FAILED) {
+    close(shm->indir_g_shm_fd);
+    shm->indir_g_shm_fd = -1;
+    shm_unlink(shm->indir_g_shm_file_path);
+    shm->indir_g_shm_file_path[0] = 0;
+    PFATAL("mmap() failed");
+  }
+  if (!non_instrumented_mode)
+    setenv(INDIR_SHM_ENV_VAR, shm->indir_g_shm_file_path, 1);
+  if (shm->indir_map == (void *)-1 || !shm->indir_map)
+    PFATAL("indir mmap() failed");
   }
 
 #else
@@ -352,6 +407,26 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
 
   }
 
+  // INDIR_CHANGE: legacy; I probably won't even be testing this
+  if (shm->indir_mode) {
+    shm->indir_shm_id = shmget(IPC_PRIVATE, INDIR_SHMEM_SIZE,
+                                IPC_CREAT | IPC_EXCL | permission);
+    if (shm->indir_shm_id < 0) {
+      shmctl(shm->shm_id, IPC_RMID, NULL);  // do not leak shmem
+      if (shm->cmplog_mode) { shmctl(shm->cmplog_shm_id, IPC_RMID, NULL); }
+      PFATAL("shmget() failed, try running afl-system-config");
+    }
+    if (gid != -1) {
+      if (shmctl(shm->indir_shm_id, IPC_STAT, &shmid_ds) == -1) {
+        PFATAL("shmctl(IPC_STAT) failed");
+      }
+      shmid_ds.shm_perm.gid = (gid_t)gid;
+      if (shmctl(shm->indir_shm_id, IPC_SET, &shmid_ds) == -1) {
+        PFATAL("shmctl(IPC_SET) failed");
+      }
+    }
+  }
+
   if (!non_instrumented_mode) {
 
     shm_str = alloc_printf("%d", shm->shm_id);
@@ -377,6 +452,17 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
 
   }
 
+  // INDIR_CHANGE
+  if (shm->indir_mode && !non_instrumented_mode) {
+
+    shm_str = alloc_printf("%d", shm->indir_shm_id);
+
+    setenv(INDIR_SHM_ENV_VAR, shm_str, 1);
+
+    ck_free(shm_str);
+
+  }
+
   shm->map = shmat(shm->shm_id, NULL, 0);
 
   if (shm->map == (void *)-1 || !shm->map) {
@@ -386,6 +472,13 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
     if (shm->cmplog_mode) {
 
       shmctl(shm->cmplog_shm_id, IPC_RMID, NULL);  // do not leak shmem
+
+    }
+
+    //INDIR_CHANGE
+    if (shm->indir_mode) {
+
+      shmctl(shm->indir_shm_id, IPC_RMID, NULL);  // do not leak shmem
 
     }
 
@@ -402,11 +495,24 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
       shmctl(shm->shm_id, IPC_RMID, NULL);  // do not leak shmem
 
       shmctl(shm->cmplog_shm_id, IPC_RMID, NULL);  // do not leak shmem
+      // INDIR_CHANGE
+      if (shm->indir_mode) {shmctl(shm->indir_shm_id, IPC_RMID, NULL);}  // do not leak shmem
 
       PFATAL("shmat() failed");
 
     }
 
+  }
+
+  // INDIR_CHANGE
+  if (shm->indir_mode) {
+    shm->indir_map = shmat(shm->indir_shm_id, NULL, 0);
+    if (shm->indir_map == (void *)-1 || !shm->indir_map) {
+      shmctl(shm->shm_id, IPC_RMID, NULL);  // do not leak shmem
+      if (shm->cmplog_mode) {shmctl(shm->cmplog_shm_id, IPC_RMID, NULL);}  // do not leak shmem
+      shmctl(shm->indir_shm_id, IPC_RMID, NULL);  // do not leak shmem
+      PFATAL("shmat() failed");
+    }
   }
 
 #endif

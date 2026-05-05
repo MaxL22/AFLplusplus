@@ -124,6 +124,11 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->first_trace = ck_alloc(map_size);
   afl->map_tmp_buf = ck_alloc(map_size);
 
+  // INDIR_CHANGE
+  // alloc and initialize virgin indir map
+  afl->indir_virgin_bits = ck_alloc(INDIR_SHMEM_SIZE);
+  memset(afl->indir_virgin_bits, 255, INDIR_SHMEM_SIZE);
+
   /* Initialize IJON max tracking state */
   afl->ijon_state = NULL;
   afl->ijon_bits = NULL;
@@ -914,6 +919,9 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
 /* Removes this afl_state instance and frees it. */
 
 void afl_state_deinit(afl_state_t *afl) {
+
+  // INDIR_CHANGE
+  if (afl->shm.indir_mode) { ck_free(afl->indir_virgin_bits); }
 
   if (afl->in_place_resume) { ck_free(afl->in_dir); }
   if (afl->sync_id) { ck_free(afl->out_dir); }

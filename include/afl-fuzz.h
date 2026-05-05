@@ -561,6 +561,10 @@ struct foreign_sync {
 
 typedef struct afl_state {
 
+  // INDIR_CHANGE
+  u8 *indir_trace_bits,  // map
+    *indir_virgin_bits;  // coverage state
+  
   /* Position of this state in the global states list */
   u32 _id;
 
@@ -1294,6 +1298,8 @@ void update_bitmap_rescore(afl_state_t *, struct queue_entry *, u32);
 
 void write_bitmap(afl_state_t *);
 u32  count_bits(afl_state_t *, u8 *);
+// INDIR_CHANGE
+u32 count_indir_bits(afl_state_t *afl);
 u32  count_bytes(afl_state_t *, u8 *);
 u32  count_non_255_bytes(afl_state_t *, u8 *);
 void simplify_trace(afl_state_t *, u8 *);

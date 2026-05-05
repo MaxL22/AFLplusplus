@@ -43,6 +43,11 @@
    Default: 8MB (defined in bytes) */
 #define DEFAULT_SHMEM_SIZE (8 * 1024 * 1024)
 
+// INDIR_CHANGE
+// Size of the custom map. It's pretty random, has to be tuned
+// It HAS to be a power of 2, stuff breaks otherwise
+#define INDIR_SHMEM_SIZE (8192*4)
+
 /* Default time until when no more coverage finds are happening afl-fuzz
    switches to exploitation mode. It automatically switches back when new
    coverage is found.
@@ -430,6 +435,8 @@
 /* Environment variable used to pass SHM ID to the called program. */
 
 #define SHM_ENV_VAR "__AFL_SHM_ID"
+//INDIR_CHANGE
+#define INDIR_SHM_ENV_VAR "__AFL_INDIR_SHM_ID"
 
 /* Environment variable used to pass shared memory fuzz map id
 and the mapping size to the called program. */

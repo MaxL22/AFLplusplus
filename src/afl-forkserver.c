@@ -314,6 +314,11 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
 
   }
 
+  // INDIR_CHANGE: set indir_mode to 1
+  if (getenv("AFL_LLVM_INDIRECT")) {
+    fsrv->indir_mode = 1;
+  }
+  
   /* exec related stuff */
   fsrv->child_pid = -1;
   fsrv->map_size = get_map_size();
@@ -2197,8 +2202,16 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
     MEM_BARRIER();
 #endif
 
+    // INDIR_CHANGE
+    // This resets the shared memory
+    if (fsrv->indir_mode && fsrv->indir_bits) {
+      memset(fsrv->indir_bits, 0, INDIR_SHMEM_SIZE);
+    }
+    MEM_BARRIER();
   }
 
+
+  
   /* we have the fork server (or faux server) up and running
   First, tell it if the previous run timed out. */
 

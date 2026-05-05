@@ -129,7 +129,8 @@ extern u64 time_spent_working;
 static void at_exit() {
 
   s32   i, pid1 = 0, pid2 = 0, pgrp = -1;
-  char *list[4] = {SHM_ENV_VAR, SHM_FUZZ_ENV_VAR, CMPLOG_SHM_ENV_VAR, NULL};
+  // INDIR_CHANGE: added the env var
+  char *list[5] = {SHM_ENV_VAR, SHM_FUZZ_ENV_VAR, CMPLOG_SHM_ENV_VAR, INDIR_SHM_ENV_VAR, NULL};
   char *ptr;
 
   ptr = getenv("__AFL_TARGET_PID2");
@@ -2677,10 +2678,28 @@ int main(int argc, char **argv_orig, char **envp) {
 
   afl->argv = use_argv;
 
+  // INDIR_CHANGE: env var
+  if (getenv("AFL_LLVM_INDIRECT")) {
+    afl->shm.indir_mode = 1;
+    OKF("Indirect jumps tracking enabled");
+  } else {
+    // TODO: change to 0
+    // afl->shm.indir_mode = 0;
+    afl->shm.indir_mode = 1;
+  }
+  
   afl->fsrv.trace_bits =
       afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode,
                    afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
 
+  // INDIR_CHANGE
+  if (afl->shm.indir_mode) {
+    afl->indir_virgin_bits = ck_alloc(INDIR_SHMEM_SIZE);
+    memset(afl->indir_virgin_bits, 255, INDIR_SHMEM_SIZE);
+  }
+  // link indir_bits and initialized map
+  afl->fsrv.indir_bits = afl->shm.indir_map;
+  
   #ifdef __AFL_CODE_COVERAGE
   // Initialize pcmap and modmap before any forkserver starts
   if (getenv("AFL_DUMP_PC_MAP")) {
@@ -2722,6 +2741,8 @@ int main(int argc, char **argv_orig, char **envp) {
           afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode,
                        afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
       setenv("AFL_NO_AUTODICT", "1", 1);  // loaded already
+      //INDIR_CHANGE
+      afl->fsrv.indir_bits = afl->shm.indir_map;
 
   #ifdef __AFL_CODE_COVERAGE
       if (getenv("AFL_DUMP_PC_MAP")) { afl_pcmap_resize(afl, new_map_size); }
@@ -2873,6 +2894,8 @@ int main(int argc, char **argv_orig, char **envp) {
         afl->fsrv.trace_bits =
             afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode,
                          afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
+        // INDIR_CHANGE
+        afl->fsrv.indir_bits = afl->shm.indir_map;
         ck_free(afl->san_fsrvs[i].trace_bits);
         afl->san_fsrvs[i].trace_bits = ck_alloc(afl->fsrv.map_size + 8);
         afl->san_fsrvs[i].map_size = afl->fsrv.map_size;
