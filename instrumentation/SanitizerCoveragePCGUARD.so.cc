@@ -142,7 +142,7 @@ class ModuleSanitizerCoverageAFL
   void            instrumentFunction(Function &F, DomTreeCallback DTCallback,
                                      PostDomTreeCallback PDTCallback);
   bool            InjectCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
-  // INDIRECTING: function def
+  // INDIR_CHANGE: function def
   bool            InjectIndirCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   GlobalVariable *CreateFunctionLocalArrayInSection(size_t    NumElements,
                                                     Function &F, Type *Ty,
@@ -158,7 +158,7 @@ class ModuleSanitizerCoverageAFL
 
   // Helper functions for cleaner code
   bool   isInstructionInteresting(Instruction &IN);
-  // INDIRECTING: helper function definition
+  // INDIR_CHANGE: helper function definition
   bool   isInstructionIndirInteresting(Instruction &IN);
   bool   isAflInterestingCall(Instruction &IN);
   void   initializeVersionSpecificTypes(IRBuilder<> &IRB);
@@ -175,7 +175,7 @@ class ModuleSanitizerCoverageAFL
                                 ArrayRef<BasicBlock *> AllBlocks);
   void   updateCoverageForSelect(IRBuilder<> &IRB, Value *result, Value *MapPtr,
                                  uint32_t &vector_cnt);
-  // INDIRECTING: new function header
+  // INDIR_CHANGE: new function header
   // Dead code, for now, might be changed later
   void   updateCoverageForTerminator(IRBuilder<> &IRB, Value *result, 
                                      Value *MapPtr, uint32_t &vector_cnt);
@@ -200,7 +200,7 @@ class ModuleSanitizerCoverageAFL
 
   SanitizerCoverageOptions Options;
 
-  // INDIRECTING: added indir counter for blocks skipped and indir_enable
+  // INDIR_CHANGE: added indir counter for blocks skipped and indir_enable
   uint32_t instr = 0, selects = 0, unhandled = 0, skippedbb = 0, dump_cc = 0, indir = 0;
   GlobalVariable *AFLMapPtr = NULL;
   GlobalVariable *AFLCovMapSize = NULL;
@@ -334,7 +334,7 @@ bool ModuleSanitizerCoverageAFL::isInstructionInteresting(Instruction &I) {
 
 }
 
-// INDIRECTING: new helper function
+// INDIR_CHANGE: new helper function
 bool ModuleSanitizerCoverageAFL::isInstructionIndirInteresting(Instruction &I) {
 
   return isAflCovInterestingIndirInstruction(I);
@@ -394,7 +394,7 @@ void ModuleSanitizerCoverageAFL::setupEnvironmentVariables() {
   ijon_enabled = getenv("AFL_LLVM_IJON");
   if (getenv("AFL_LLVM_DENY_EXEC")) { deny_exec = true; }
 
-  //INDIRECTING: parsing of env var
+  //INDIR_CHANGE: parsing of env var
   if (getenv("AFL_LLVM_INDIRECT")) { indir_enable = true; }
 }
 
@@ -581,7 +581,7 @@ void ModuleSanitizerCoverageAFL::updateCoverageForSelect(IRBuilder<> &IRB,
 
 }
 
-// INDIRECTING: new function
+// INDIR_CHANGE: new function
 void ModuleSanitizerCoverageAFL::updateCoverageForTerminator(IRBuilder<> &IRB,
                                                              Value *result,
                                                              Value *MapPtr,
@@ -761,7 +761,7 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
       OKF("Instrumented %u locations with no collisions (%s mode) of which are "
           "%u handled and %u unhandled special instructions.%s",
           instr, modeline, selects, unhandled, buf);
-      // INDIRECTING; new print for indir stuff
+      // INDIR_CHANGE; new print for indir stuff
       if (indir_enable) {
         OKF("Instrumented %u indirect locations I guess", indir);
       }
@@ -929,7 +929,7 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
 
   InjectCoverage(F, BlocksToInstrument);
   
-  //INDIRECTING
+  //INDIR_CHANGE
   if (indir_enable) {InjectIndirCoverage(F, BlocksToInstrument);}
 
   if (dump_cc) { calcCyclomaticComplexity(&F); }
@@ -982,7 +982,7 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 
 }
 
-//INDIRECTING: injectIndirCoverage definition
+//INDIR_CHANGE: injectIndirCoverage definition
 bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
   Function&F, ArrayRef<BasicBlock *> AllBlocks) {
 
@@ -991,42 +991,37 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
 
   uint32_t cnt_cov = 0, cnt_sel = 0, cnt_sel_inc = 0, skip_blocks = 0,
            cnt_special = 0;
+
+  // Open file
+  std::error_code EC;
+  raw_fd_ostream LogFile("/out/indirect_calls.txt", EC, sys::fs::OF_Append);
+
+  if (EC) {
+    errs() << "Warning: Could not open indirect_calls.txt for logging: " 
+           << EC.message() << "\n";
+  }
   
   for (auto &BB: F) {
 
     bool block_is_instrumented = false;
     
     for (auto &IN: BB) {
-      // TODO
-      //  Should check dlopen stuff? (What is it?)
-      //  Check other stuff InjectCoverage is doing (I ain't doing all that?)
-      //  IRBuilder, inject callback?
-      
       bool instrumentInst = isInstructionIndirInteresting(IN);
-
-      if (instrumentInst)
+      
+      if (instrumentInst) {
         indir++;
 
-      // This is "old" code
-      // if (instrumentInst) {
-
-      //   IndirectBrInst    *ibr = dyn_cast<IndirectBrInst>(&IN);
-      //   CallBase          *call= dyn_cast<CallBase>(&IN);
-
-      //   if (ibr) {
-
-      //     cnt_sel++; // Number of special instructions
-      //     // How many guards there will actually be (1 in this case)
-      //     cnt_sel_inc++;
-          
-      //   } else if (call) {
-
-      //     cnt_sel++;
-      //     cnt_sel_inc++;
-        
-      //   }         
-      // }
-      
+        if (const DILocation *Loc = IN.getDebugLoc()) {
+          if (!EC) {
+            LogFile << Loc->getFilename() << ":" << Loc->getLine() << "\n";
+          }
+        } else {
+          // if code was compiled without debug symbols (-g)
+          if (!EC) {
+            LogFile << "Unknown_Source_File:0\n";
+          }
+        }
+      }
     }
   }
 
