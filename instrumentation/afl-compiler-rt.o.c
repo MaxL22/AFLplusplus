@@ -3773,7 +3773,7 @@ void __afl_trace_indir(uint32_t indir_id, uintptr_t target_addr) {
   // The number of the bit to raise
   // uint32_t bit_idx = hash1(target_addr) & 31;
   // This removes a call, idk if it can be inlined
-  uint32_t bit_idx = ((uint8_t) (((target_addr >> 3) * 0x9E3779B97F4A7C15ULL) >> 56)) & 31; 
+  uint32_t bit_idx = ((uint8_t) (((target_addr >> 3) * 0x9E3779B97F4A7C15ULL) >> 56)) >> 3;
   // Raise the bit
   indir_map_32[slot] |= (1U << bit_idx);
   // TODO: Handle the atomic bitwise operation if AFL_LLVM_THREADSAFE_INST is up
