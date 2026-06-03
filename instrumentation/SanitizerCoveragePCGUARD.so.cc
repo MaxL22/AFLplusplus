@@ -19,12 +19,6 @@
   #pragma GCC diagnostic ignored "-Wformat-truncation="
 #endif
 
-// INDIR_CHANGE: afl++'s deterministic hash
-#define XXH_INLINE_ALL
-#include "xxhash.h"
-#undef XXH_INLINE_ALL
-
-
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -106,6 +100,8 @@ const char SanCovTracePCGuardInitName[] = "__sanitizer_cov_trace_pc_guard_init";
 const char SanCovTracePCGuardName[] = "__sanitizer_cov_trace_pc_guard";
 
 const char SanCovGuardsSectionName[] = "sancov_guards";
+// INDIR_CHANGE: added SanCovIndirGuardsSectionName
+const char SanCovIndirGuardsSectionName[] = "__sancov_indir_guards";
 const char SanCovCountersSectionName[] = "sancov_cntrs";
 const char SanCovBoolFlagSectionName[] = "sancov_bools";
 const char SanCovPCsSectionName[] = "sancov_pcs";
@@ -171,6 +167,8 @@ class ModuleSanitizerCoverageAFL
   void   setupEnvironmentVariables();
   void   setupIJONSymbols(Module &M, bool uses_ijon_state);
   Value *createGuardPointer(IRBuilder<> &IRB, uint32_t index);
+  // INDIR_CHANGE: added createIndirGuardPointer declaration
+  Value *createIndirGuardPointer(IRBuilder<> &IRB, uint32_t index);
   void   updateCoverageBitmap(IRBuilder<> &IRB, Value *CoverageIndex,
                               Value *MapPtr);
   void   printDebugInfo(Instruction &IN);
@@ -197,6 +195,8 @@ class ModuleSanitizerCoverageAFL
   const DataLayout *DL;
 
   GlobalVariable                *FunctionGuardArray;  // for trace-pc-guard.
+  // INDIR_CHANGE: added FunctionIndirGuardArray
+  GlobalVariable                *FunctionIndirGuardArray = nullptr;
   SmallVector<GlobalValue *, 20> GlobalsToAppendToUsed;
   SmallVector<GlobalValue *, 20> GlobalsToAppendToCompilerUsed;
 
@@ -408,6 +408,17 @@ Value *ModuleSanitizerCoverageAFL::createGuardPointer(IRBuilder<> &IRB,
 
   return IRB.CreateIntToPtr(
       IRB.CreateAdd(IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
+                    ConstantInt::get(IntptrTy, index * 4)),
+      Int32PtrTy);
+
+}
+
+// INDIR_CHANGE: added createIndirGuardPointer
+Value *ModuleSanitizerCoverageAFL::createIndirGuardPointer(IRBuilder<> &IRB,
+                                                      uint32_t     index) {
+
+  return IRB.CreateIntToPtr(
+      IRB.CreateAdd(IRB.CreatePointerCast(FunctionIndirGuardArray, IntptrTy),
                     ConstantInt::get(IntptrTy, index * 4)),
       Int32PtrTy);
 
@@ -712,6 +723,12 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
                                       SanCovTracePCGuardInitName, Int32PtrTy,
                                       SanCovGuardsSectionName);
 
+  // INDIR_CHANGE: added Indir Ctor registration
+  if (FunctionIndirGuardArray)
+    CreateInitCallsForSections(M, "sancov.module_ctor_indir_guard",
+                               "__afl_indir_trace_pc_guard_init", Int32PtrTy,
+                               SanCovIndirGuardsSectionName);
+
   if (Ctor && debug) {
 
     fprintf(stderr, "SANCOV: installed pcguard_init in ctor\n");
@@ -969,68 +986,51 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 
 }
 
-//INDIR_CHANGE: injectIndirCoverage definition
+//INDIR_CHANGE: InjectIndirCoverage definition for guard array
 bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
-  Function&F, ArrayRef<BasicBlock *> AllBlocks) {
+  Function &F, ArrayRef<BasicBlock *> AllBlocks) {
 
-  // Define the types we need for the function signature: void(i32, i64)
-  Type *VoidTy = Type::getVoidTy(*C);
-  // Declare the external callback function
-  FunctionCallee TraceIndirCb = F.getParent()->getOrInsertFunction(
-    "__afl_trace_indir", 
-    VoidTy,    // Return type
-    Int32Ty,   // Arg 1: indir_val
-    IntptrTy   // Arg 2: target_addr
-    );
-
-  // idk tbf
   if (AllBlocks.empty()) return false;
-
-  uint32_t local_indir = 0;
-
-  // mod and func name, for hashing later
-  std::string modName = F.getParent()->getName().str();
-  std::string funcName = F.getName().str();
   
-  for (auto &BB: F) {
-  
-    for (auto &IN: BB) {
-      
-      bool instrumentInst = isInstructionIndirInteresting(IN);
+  uint32_t num_indir = 0;
+  for (auto &BB : F)
+    for (auto &IN : BB)
+      if (isInstructionIndirInteresting(IN))
+        num_indir++;
 
-      if (instrumentInst) {
-        // Counter
-        indir++;
+  if (num_indir == 0) return false;
 
-        IndirectBrInst    *ibr = dyn_cast<IndirectBrInst>(&IN);
-        CallBase          *call= dyn_cast<CallBase>(&IN);
+  FunctionIndirGuardArray = CreateFunctionLocalArrayInSection(
+      num_indir, F, Int32Ty, SanCovIndirGuardsSectionName);
 
-        IRBuilder<> IRB(&IN);
+  FunctionCallee TraceIndirCb = F.getParent()->getOrInsertFunction(
+      "__afl_trace_indir",
+      Type::getVoidTy(*C),
+      Int32PtrTy,    // Arg 1: pointer to guard slot
+      IntptrTy       // Arg 2: target_addr
+  );
 
-        // Create hash, get it as 32 bit val
-        std::string hash_str = modName + ":" + funcName + ":" + std::to_string(local_indir++);
-        Value *IndirIdVal = ConstantInt::get(Int32Ty, (uint32_t) XXH32(hash_str.c_str(), hash_str.length(), 0));
-        Value *TargetPtr = NULL;
+  uint32_t local_idx = 0;
 
-        // Get target address
-        if (ibr) {
+  for (auto &BB : F) {
+    for (auto &IN : BB) {
+      if (!isInstructionIndirInteresting(IN)) continue;
 
-          TargetPtr = ibr->getAddress();
-          
-        } else if (call) {
+      IRBuilder<> IRB(&IN);
+      Value *GuardPtr = createIndirGuardPointer(IRB, local_idx++);
+      Value *TargetPtr = nullptr;
 
-          TargetPtr = call->getCalledOperand();
-          
-        }
+      if (auto *ibr = dyn_cast<IndirectBrInst>(&IN))
+        TargetPtr = ibr->getAddress();
+      else if (auto *call = dyn_cast<CallBase>(&IN))
+        TargetPtr = call->getCalledOperand();
 
-        Value *TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
-        IRB.CreateCall(TraceIndirCb, {IndirIdVal, TargetAddrInt});
-        
-      }
-      
+      Value *TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
+      IRB.CreateCall(TraceIndirCb, {GuardPtr, TargetAddrInt});
+
+      indir++;
     }
   }
-
   return true;
 }
 

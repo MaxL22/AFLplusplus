@@ -54,6 +54,8 @@ typedef uint128_t         u128;
 #define FS_NEW_VERSION_MAX 1
 #define FS_NEW_ERROR 0xeffe0000
 #define FS_NEW_OPT_MAPSIZE 0x00000001      // parameter: 32 bit value
+// INDIR_CHANGE: added FS_NEW_OPT_INDIR_MAPSIZE
+#define FS_NEW_OPT_INDIR_MAPSIZE 0x00000010 // parameter: 32 bit value
 #define FS_NEW_OPT_SHDMEM_FUZZ 0x00000002  // parameter: none
 #define FS_NEW_OPT_AUTODICT 0x00000800     // autodictionary data
 

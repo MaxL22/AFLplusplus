@@ -126,6 +126,8 @@ typedef struct afl_forkserver {
   u32 exec_tmout;                       /* Configurable exec timeout (ms)   */
   u32 init_tmout;                       /* Configurable init timeout (ms)   */
   u32 map_size;                         /* map size used by the target      */
+  // INDIR_CHANGE: added indir_map_size
+  u32 indir_map_size;                   /* indir map size used by the target */
   u32 real_map_size;                    /* real map size, unaligned         */
   u32 snapshot;                         /* is snapshot feature used         */
   u64 mem_limit;                        /* Memory cap for child (MB)        */

@@ -2687,15 +2687,22 @@ int main(int argc, char **argv_orig, char **envp) {
     // afl->shm.indir_mode = 0;
     afl->shm.indir_mode = 1;
   }
-  
+  // INDIR_CHANGE: Setup dummy size and env var
+  if (afl->shm.indir_mode) {
+    afl->shm.indir_map_size = DEFAULT_INDIR_SHMEM_SIZE;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%zu", afl->shm.indir_map_size);
+    setenv(INDIR_MAP_SIZE_ENV_VAR, buf, 1); // It's just putting it as a string
+  }
+
   afl->fsrv.trace_bits =
       afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode,
                    afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
-
-  // INDIR_CHANGE
+    
+  // INDIR_CHANGE: Dynamic allocation
   if (afl->shm.indir_mode) {
-    afl->indir_virgin_bits = ck_alloc(INDIR_SHMEM_SIZE);
-    memset(afl->indir_virgin_bits, 255, INDIR_SHMEM_SIZE);
+    afl->indir_virgin_bits = ck_alloc(afl->shm.indir_map_size);
+    memset(afl->indir_virgin_bits, 255, afl->shm.indir_map_size);
   }
   // link indir_bits and initialized map
   afl->fsrv.indir_bits = afl->shm.indir_map;
@@ -2727,18 +2734,37 @@ int main(int argc, char **argv_orig, char **envp) {
     u32 new_map_size = afl_fsrv_get_mapsize(
         &afl->fsrv, afl->argv, &afl->stop_soon, afl->afl_env.afl_debug_child);
 
-    // only reinitialize if the map needs to be larger than what we have.
-    if (map_size < new_map_size) {
+    // INDIR_CHANGE: Dynamic shm resize for indir_map_size
+    u32 new_indir_map_size = afl->shm.indir_mode ? afl->fsrv.indir_map_size : 0;
+    bool needs_resize = (map_size < new_map_size);
+    bool indir_needs_resize = (new_indir_map_size > 0 && afl->shm.indir_map_size < new_indir_map_size);
 
-      OKF("Re-initializing maps to %u bytes", new_map_size);
-      afl_resize_map_buffers(afl, map_size, new_map_size);
+    // only reinitialize if the map needs to be larger than what we have.
+    // It has been changed to accomodate the second map
+    if (needs_resize || indir_needs_resize) {
+
+      OKF("Re-initializing maps to %u bytes (indir: %u bytes)", new_map_size, new_indir_map_size);
+      if (needs_resize) {
+          afl_resize_map_buffers(afl, map_size, new_map_size);
+      }
 
       afl_fsrv_kill(&afl->fsrv);
       afl_shm_deinit(&afl->shm);
-      afl->fsrv.map_size = new_map_size;
+      if (needs_resize) {
+          afl->fsrv.map_size = new_map_size;
+      }
+      if (indir_needs_resize) {
+          afl->shm.indir_map_size = new_indir_map_size;
+          ck_free(afl->indir_virgin_bits);
+          afl->indir_virgin_bits = ck_alloc(new_indir_map_size);
+          memset(afl->indir_virgin_bits, 255, new_indir_map_size);
+          char vbuf_indir[16];
+          snprintf(vbuf_indir, sizeof(vbuf_indir), "%u", new_indir_map_size);
+          setenv(INDIR_MAP_SIZE_ENV_VAR, vbuf_indir, 1);
+      }
 
       afl->fsrv.trace_bits =
-          afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode,
+          afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode,
                        afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
       setenv("AFL_NO_AUTODICT", "1", 1);  // loaded already
       //INDIR_CHANGE
@@ -2751,8 +2777,9 @@ int main(int argc, char **argv_orig, char **envp) {
       afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
                      afl->afl_env.afl_debug_child);
 
-      map_size = new_map_size;
-
+      if (needs_resize) {
+          map_size = new_map_size;
+      }
     }
 
   }

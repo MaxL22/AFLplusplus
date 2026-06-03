@@ -51,6 +51,8 @@ typedef struct sharedmem {
   u8 *map;                                          /* shared memory region */
 
   size_t map_size;                                 /* actual allocated size */
+  // INDIR_CHANGE: added indir_map_size
+  size_t indir_map_size;                           /* actual allocated indir size */
 
   int             cmplog_mode;
   int             sanfuzz_mode;

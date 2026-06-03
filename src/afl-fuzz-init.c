@@ -951,10 +951,11 @@ void perform_dry_run(afl_state_t *afl) {
 
     if (res == afl->crash_mode || res == FSRV_RUN_NOBITS) {
 
+      // INDIR_CHANGE: added indir map size
       SAYF(cGRA
-           "    len = %u, map size = %u, exec speed = %llu us, hash = "
+           "    len = %u, map size = %u, indir map size = %zu, exec speed = %llu us, hash = "
            "%016llx\n" cRST,
-           q->len, q->bitmap_size, q->exec_us, q->exec_cksum);
+           q->len, q->bitmap_size, afl->shm.indir_map_size, q->exec_us, q->exec_cksum);
 
     }
 

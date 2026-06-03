@@ -43,10 +43,9 @@
    Default: 8MB (defined in bytes) */
 #define DEFAULT_SHMEM_SIZE (8 * 1024 * 1024)
 
-// INDIR_CHANGE
-// Size of the custom map. It's pretty random, has to be tuned
-// It HAS to be a power of 2, stuff breaks otherwise
-#define INDIR_SHMEM_SIZE (8192*4)
+// INDIR_CHANGE: Renamed INDIR_SHMEM_SIZE to DEFAULT_INDIR_SHMEM_SIZE, added env var for map size
+#define DEFAULT_INDIR_SHMEM_SIZE (2048 * 8)
+#define INDIR_MAP_SIZE_ENV_VAR "AFL_INDIR_MAP_SIZE"
 
 /* Default time until when no more coverage finds are happening afl-fuzz
    switches to exploitation mode. It automatically switches back when new

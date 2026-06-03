@@ -167,8 +167,8 @@ static u8 *__afl_area_ptr_backup = __afl_area_initial;
 
 u8        *__afl_area_ptr = __afl_area_initial;
 
-/// INDIR_CHANGE: allocate dummy map statically, as above
-static u8  __afl_indir_initial[INDIR_SHMEM_SIZE];
+/// INDIR_CHANGE: dummy map and dynamic sizes
+static u8  __afl_indir_initial[4096]; // (size does not matter, it's just a page, reallocated after)
 static u8 *__afl_indir_ptr_dummy = __afl_indir_initial;
 u8        *__afl_indir_ptr = __afl_indir_initial;
 
@@ -179,6 +179,9 @@ u32       *__afl_fuzz_len = &__afl_fuzz_len_dummy;
 int        __afl_sharedmem_fuzzing __attribute__((weak));
 
 u32 __afl_final_loc;
+// INDIR_CHANGE: global var for size and loc count
+u32 __afl_indir_final_loc = 0;
+u32 __afl_indir_map_size = DEFAULT_INDIR_SHMEM_SIZE;
 u32 __afl_map_size = MAP_SIZE;
 u32 __afl_cov_map_size = MAP_SIZE;
 u32 __afl_set_map_size = MAP_SIZE;
@@ -915,6 +918,25 @@ static void __afl_map_shm(void) {
             id_str == NULL ? "<null>" : id_str);
   }
   
+  // INDIR_CHANGE: read AFL_INDIR_MAP_SIZE var to get size
+  char *indir_size_str = getenv("AFL_INDIR_MAP_SIZE");
+  u32 env_indir_val = 0;
+  if (indir_size_str) { env_indir_val = atoi(indir_size_str) / sizeof(uint32_t); }
+  
+  if (__afl_indir_final_loc) {
+      __afl_indir_map_size = __afl_indir_final_loc + 1;
+  } else {
+      __afl_indir_map_size = DEFAULT_INDIR_SHMEM_SIZE / sizeof(uint32_t);
+  }
+  // Uses the env var only if bigger
+  if (env_indir_val > (DEFAULT_INDIR_SHMEM_SIZE / sizeof(uint32_t)) && env_indir_val > __afl_indir_map_size) {
+      __afl_indir_map_size = env_indir_val;
+  }
+
+  if (__afl_debug) {
+    fprintf(stderr, "DEBUG: Indirect jumps map size: %u\n", __afl_indir_map_size);
+  }
+
   if (id_str) {
 #ifdef USEMMAP
     const char     *shm_file_path = id_str;
@@ -929,7 +951,9 @@ static void __afl_map_shm(void) {
     }
 
     /* map the shared memory segment to the address space of the process */
-    shm_base = mmap(0, INDIR_SHMEM_SIZE, PROT_READ | PROT_WRITE,
+    // INDIR_CHANGE
+    size_t indir_shm_bytes = __afl_indir_map_size * sizeof(uint32_t);
+    shm_base = mmap(0, indir_shm_bytes, PROT_READ | PROT_WRITE,
                     MAP_SHARED, shm_fd, 0);
 
     if (shm_base == MAP_FAILED) {
@@ -1086,7 +1110,7 @@ static void __afl_unmap_shm(void) {
   id_str = getenv(INDIR_SHM_ENV_VAR);
   if (id_str) {
 #ifdef USEMMAP
-    munmap((void *)__afl_indir_ptr, INDIR_SHMEM_SIZE);
+    munmap((void *)__afl_indir_ptr, __afl_indir_map_size * sizeof(uint32_t));
 #else
     shmdt((void *)__afl_indir_ptr);
 #endif
@@ -1229,6 +1253,9 @@ static void __afl_start_forkserver(void) {
 
     }
 
+    // INDIR_CHANGE: add indir flag
+    if (__afl_indir_final_loc > 0) { status |= FS_NEW_OPT_INDIR_MAPSIZE; }
+
     /* Add IJON capability flag if IJON is enabled */
     if (__afl_ijon_enabled) { status |= FS_OPT_IJON; }
 
@@ -1244,6 +1271,12 @@ static void __afl_start_forkserver(void) {
     // FS_NEW_OPT_MAPSIZE - we always send the map size
     status = __afl_map_size;
     if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
+
+    // INDIR_CHANGE: send indir map size to fsrv fd
+    if (__afl_indir_final_loc > 0) {
+        u32 indir_sz = __afl_indir_map_size * sizeof(uint32_t);
+        if (write(FORKSRV_FD + 1, &indir_sz, 4) != 4) { _exit(1); }
+    }
 
     // FS_NEW_OPT_SHDMEM_FUZZ - no data
 
@@ -1457,9 +1490,8 @@ int __afl_persistent_loop(unsigned int max_cnt) {
     memset_noasan(__afl_area_ptr, 0, __afl_set_map_size);
     __afl_area_ptr[0] = 1;
     memset_noasan(__afl_prev_loc, 0, NGRAM_SIZE_MAX * sizeof(PREV_LOC_T));
-    //INDIR_CHANGE
-    // Reset the new area as well
-    memset_noasan(__afl_indir_ptr, 0, INDIR_SHMEM_SIZE);
+    //INDIR_CHANGE: Reset the new area as well (no macro)
+    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(uint32_t));
 
     first_pass = 0;
     __afl_selective_coverage_temp = 1;
@@ -1526,8 +1558,8 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 
     memset_noasan(__afl_prev_loc, 0, NGRAM_SIZE_MAX * sizeof(PREV_LOC_T));
 
-    // INDIR_CHANGE: reset memory for next run
-    memset_noasan(__afl_indir_ptr, 0, INDIR_SHMEM_SIZE);
+    // INDIR_CHANGE
+    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(uint32_t));
 
     return 1;
 
@@ -2416,6 +2448,33 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 
   }
 
+}
+
+// INDIR_CHANGE: added __afl_indir_trace_pc_guard_init
+void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
+
+  if (start == stop || *start) return;
+
+  if (__afl_indir_final_loc < 1) __afl_indir_final_loc = 1;
+
+  if (__afl_already_initialized_forkserver) {
+    if (!getenv("AFL_IGNORE_PROBLEMS")) {
+      fprintf(stderr, "[-] FATAL: forkserver already up, indir dlopen'd\n");
+      abort();
+    }
+    static u32 offset = 2;
+    while (start < stop) {
+      *(start++) = offset;
+      if (++offset >= __afl_indir_final_loc) offset = 2;
+    }
+    return;
+  }
+
+  while (start < stop) {
+    *(start++) = ++__afl_indir_final_loc;
+  }
+
+  __afl_indir_map_size = __afl_indir_final_loc + 1;
 }
 
 ///// CmpLog instrumentation
@@ -3749,34 +3808,17 @@ uint32_t ijon_memdist(char *a, char *b, size_t len) {
 
 }
 
-//INDIR_CHANGE: callback definition
-// Macros for ease of use
-#define BLOCK_SIZE 32
-#define INDIR_MAP_MASK  ((((INDIR_SHMEM_SIZE) * 8) / BLOCK_SIZE) - 1)
+//INDIR_CHANGE: rewrote __afl_trace_indir for guard slots
+void __afl_trace_indir(uint32_t *guard, uintptr_t target_addr) {
+  if (unlikely(!__afl_indir_ptr || __afl_indir_ptr == __afl_indir_ptr_dummy))
+    return;
 
-// Hashing function
-// For now it's just multiplicative (fibonacci) hashing
-// 8 bit gives up to 2^8 bits of indexing
-__attribute__((always_inline)) static inline uint8_t hash1(uintptr_t target_addr) {
-  return (uint8_t) (((target_addr >> 3) * 0x9E3779B97F4A7C15ULL) >> 56);
-}
+  if (unlikely(!(*guard))) return;
 
-// callback function
-void __afl_trace_indir(uint32_t indir_id, uintptr_t target_addr) {
-  // Early return: should do no harm, it's optimized out 
-  if (unlikely(!__afl_indir_ptr || __afl_indir_ptr == __afl_indir_ptr_dummy)) return;
-  
-  // Cast map to 32 bit
+  // Here 32 probably will need to be changed, somehow
   uint32_t *indir_map_32 = (uint32_t *)__afl_indir_ptr;
-  // Get the slot (there might be some overlap, whatevs)
-  uint32_t slot = indir_id & INDIR_MAP_MASK;
-  // The number of the bit to raise
-  // uint32_t bit_idx = hash1(target_addr) & 31;
-  // This removes a call, idk if it can be inlined
-  uint32_t bit_idx = ((uint8_t) (((target_addr >> 3) * 0x9E3779B97F4A7C15ULL) >> 56)) >> 3;
-  // Raise the bit
-  indir_map_32[slot] |= (1U << bit_idx);
-  // TODO: Handle the atomic bitwise operation if AFL_LLVM_THREADSAFE_INST is up
-  // TODO: All this should be LLVM IR for performance's sake
-    
+  // The >>3 leaves 64-56-3=5 bits (used for 32 bit indexing)
+  uint8_t bit_idx = ((uint8_t)(((target_addr >> 4) * 0x9E3779B97F4A7C15ULL) >> 56)) >> 3;
+
+  indir_map_32[*guard] |= (1U << bit_idx);
 }

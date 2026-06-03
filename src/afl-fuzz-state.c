@@ -124,10 +124,8 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->first_trace = ck_alloc(map_size);
   afl->map_tmp_buf = ck_alloc(map_size);
 
-  // INDIR_CHANGE
-  // alloc and initialize virgin indir map
-  afl->indir_virgin_bits = ck_alloc(INDIR_SHMEM_SIZE);
-  memset(afl->indir_virgin_bits, 255, INDIR_SHMEM_SIZE);
+  // INDIR_CHANGE: initialize to NULL, allocate in afl-fuzz.c later
+  afl->indir_virgin_bits = NULL;
 
   /* Initialize IJON max tracking state */
   afl->ijon_state = NULL;

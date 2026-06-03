@@ -1284,6 +1284,16 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
       }
 
+      // INDIR_CHANGE: Read indir_map_size
+      if ((status & FS_NEW_OPT_INDIR_MAPSIZE)) {
+        u32 tmp_indir_map_size;
+        rlen = read(fsrv->fsrv_st_fd, &tmp_indir_map_size, 4);
+        if (rlen != 4) { FATAL("Short read from forkserver for indir map size"); }
+        fsrv->indir_map_size = tmp_indir_map_size;
+        if (fsrv->indir_map_size % 64)
+          fsrv->indir_map_size = (((fsrv->indir_map_size + 63) >> 6) << 6); // align to 64 bit
+      }
+
       if (status & FS_NEW_OPT_SHDMEM_FUZZ) {
 
         if (fsrv->support_shmem_fuzz) {
@@ -2205,7 +2215,8 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
     // INDIR_CHANGE
     // This resets the shared memory
     if (fsrv->indir_mode && fsrv->indir_bits) {
-      memset(fsrv->indir_bits, 0, INDIR_SHMEM_SIZE);
+      // INDIR_CHANGE: dynamic shm size
+      memset(fsrv->indir_bits, 0, fsrv->indir_map_size);
     }
     MEM_BARRIER();
   }

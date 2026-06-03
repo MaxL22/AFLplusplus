@@ -132,7 +132,8 @@ void afl_shm_deinit(sharedmem_t *shm) {
   if (shm->indir_mode) {
     unsetenv(INDIR_SHM_ENV_VAR);
     if (shm->indir_map != NULL) {
-      munmap(shm->indir_map, INDIR_SHMEM_SIZE);
+      // INDIR_CHANGE: dynamic shm size
+      munmap(shm->indir_map, shm->indir_map_size);
       shm->indir_map = NULL;
     }
     if (shm->indir_g_shm_fd != -1) {
@@ -325,12 +326,14 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
     if (fchown(shm->indir_g_shm_fd, -1, gid) == -1) { PFATAL("fchown() failed"); }
   }
   /* configure the size of the shared memory segment */
-  if (ftruncate(shm->indir_g_shm_fd, INDIR_SHMEM_SIZE)) {
+  // INDIR_CHANGE: dynamic shm size
+  if (ftruncate(shm->indir_g_shm_fd, shm->indir_map_size)) {
     PFATAL("setup_shm(): indir ftruncate() failed");
   }
   /* map the shared memory segment to the address space of the process */
-  shm->indir_map = mmap(0, INDIR_SHMEM_SIZE, PROT_READ | PROT_WRITE,
-                      MAP_SHARED, shm->indir_g_shm_fd, 0);
+  // INDIR_CHANGE: dynamic shm size
+  shm->indir_map = mmap(0, shm->indir_map_size, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, shm->indir_g_shm_fd, 0);
   if (shm->indir_map == MAP_FAILED) {
     close(shm->indir_g_shm_fd);
     shm->indir_g_shm_fd = -1;
@@ -409,8 +412,9 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
 
   // INDIR_CHANGE: legacy; I probably won't even be testing this
   if (shm->indir_mode) {
-    shm->indir_shm_id = shmget(IPC_PRIVATE, INDIR_SHMEM_SIZE,
-                                IPC_CREAT | IPC_EXCL | permission);
+    // INDIR_CHANGE: dynamic shm size
+    shm->indir_shm_id = shmget(IPC_PRIVATE, shm->indir_map_size,
+                               IPC_CREAT | IPC_EXCL | permission);
     if (shm->indir_shm_id < 0) {
       shmctl(shm->shm_id, IPC_RMID, NULL);  // do not leak shmem
       if (shm->cmplog_mode) { shmctl(shm->cmplog_shm_id, IPC_RMID, NULL); }
