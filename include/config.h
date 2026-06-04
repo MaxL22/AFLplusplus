@@ -44,8 +44,11 @@
 #define DEFAULT_SHMEM_SIZE (8 * 1024 * 1024)
 
 // INDIR_CHANGE: Renamed INDIR_SHMEM_SIZE to DEFAULT_INDIR_SHMEM_SIZE, added env var for map size
-#define INDIR_FILTER_SIZE 32
-#define DEFAULT_INDIR_SHMEM_SIZE (512 * INDIR_FILTER_SIZE / 8)
+// The slot size is configurable via compile time parameters
+#ifndef INDIR_SLOT_SIZE
+#define INDIR_SLOT_SIZE 64
+#endif
+#define DEFAULT_INDIR_SHMEM_SIZE (512 * INDIR_SLOT_SIZE / 8)
 #define INDIR_MAP_SIZE_ENV_VAR "AFL_INDIR_MAP_SIZE"
 
 /* Default time until when no more coverage finds are happening afl-fuzz

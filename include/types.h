@@ -35,6 +35,23 @@ typedef unsigned __int128 uint128_t;
 typedef uint128_t         u128;
 #endif
 
+// INDIR_CHANGE: configurable indir slot type
+#if INDIR_SLOT_SIZE == 32
+  typedef uint32_t indir_slot_t;
+  #define INDIR_BIT_SHIFT 5
+#elif INDIR_SLOT_SIZE == 64
+  typedef uint64_t indir_slot_t;
+  #define INDIR_BIT_SHIFT 6
+#elif INDIR_SLOT_SIZE == 128
+  #ifndef WORD_SIZE_64
+    #error "INDIR_SLOT_SIZE=128 requires a 64-bit build (WORD_SIZE_64)"
+  #endif
+  typedef unsigned __int128 indir_slot_t;
+  #define INDIR_BIT_SHIFT 7
+#else
+  #error "Unsupported INDIR_SLOT_SIZE (must be 32, 64, or 128)"
+#endif
+
 /* Extended forkserver option values */
 
 /* Reporting errors */

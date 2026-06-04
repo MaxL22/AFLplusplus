@@ -921,12 +921,12 @@ static void __afl_map_shm(void) {
   // INDIR_CHANGE: read AFL_INDIR_MAP_SIZE var to get size
   char *indir_size_str = getenv("AFL_INDIR_MAP_SIZE");
   u32 env_indir_val = 0;
-  if (indir_size_str) { env_indir_val = atoi(indir_size_str) / sizeof(uint32_t); }
+  if (indir_size_str) { env_indir_val = atoi(indir_size_str) / sizeof(indir_slot_t); }
   
   if (__afl_indir_final_loc) {
       __afl_indir_map_size = __afl_indir_final_loc + 1;
   } else {
-      __afl_indir_map_size = DEFAULT_INDIR_SHMEM_SIZE / sizeof(uint32_t);
+      __afl_indir_map_size = DEFAULT_INDIR_SHMEM_SIZE / sizeof(indir_slot_t);
   }
   // Uses the env var only if bigger
   if (env_indir_val > __afl_indir_map_size) {
@@ -951,8 +951,7 @@ static void __afl_map_shm(void) {
     }
 
     /* map the shared memory segment to the address space of the process */
-    // INDIR_CHANGE
-    size_t indir_shm_bytes = __afl_indir_map_size * sizeof(uint32_t);
+    size_t indir_shm_bytes = __afl_indir_map_size * sizeof(indir_slot_t);
     shm_base = mmap(0, indir_shm_bytes, PROT_READ | PROT_WRITE,
                     MAP_SHARED, shm_fd, 0);
 
@@ -1110,7 +1109,7 @@ static void __afl_unmap_shm(void) {
   id_str = getenv(INDIR_SHM_ENV_VAR);
   if (id_str) {
 #ifdef USEMMAP
-    munmap((void *)__afl_indir_ptr, __afl_indir_map_size * sizeof(uint32_t));
+    munmap((void *)__afl_indir_ptr, __afl_indir_map_size * sizeof(indir_slot_t));
 #else
     shmdt((void *)__afl_indir_ptr);
 #endif
@@ -1274,7 +1273,7 @@ static void __afl_start_forkserver(void) {
 
     // INDIR_CHANGE: send indir map size to fsrv fd
     if (__afl_indir_final_loc > 0) {
-        u32 indir_sz = __afl_indir_map_size * sizeof(uint32_t);
+        u32 indir_sz = __afl_indir_map_size * sizeof(indir_slot_t);
         if (write(FORKSRV_FD + 1, &indir_sz, 4) != 4) { _exit(1); }
     }
 
@@ -1490,8 +1489,7 @@ int __afl_persistent_loop(unsigned int max_cnt) {
     memset_noasan(__afl_area_ptr, 0, __afl_set_map_size);
     __afl_area_ptr[0] = 1;
     memset_noasan(__afl_prev_loc, 0, NGRAM_SIZE_MAX * sizeof(PREV_LOC_T));
-    //INDIR_CHANGE: Reset the new area as well (no macro)
-    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(uint32_t));
+    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(indir_slot_t));
 
     first_pass = 0;
     __afl_selective_coverage_temp = 1;
@@ -1558,8 +1556,7 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 
     memset_noasan(__afl_prev_loc, 0, NGRAM_SIZE_MAX * sizeof(PREV_LOC_T));
 
-    // INDIR_CHANGE
-    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(uint32_t));
+    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(indir_slot_t));
 
     return 1;
 
@@ -3808,17 +3805,16 @@ uint32_t ijon_memdist(char *a, char *b, size_t len) {
 
 }
 
-//INDIR_CHANGE: rewrote __afl_trace_indir for guard slots
+//INDIR_CHANGE: trace indir callback
 void __afl_trace_indir(uint32_t *guard, uintptr_t target_addr) {
   if (unlikely(!__afl_indir_ptr || __afl_indir_ptr == __afl_indir_ptr_dummy))
     return;
 
   if (unlikely(!(*guard))) return;
 
-  // Here 32 probably will need to be changed, somehow
-  uint32_t *indir_map_32 = (uint32_t *)__afl_indir_ptr;
-  // The >>3 leaves 64-56-3=5 bits (used for 32 bit indexing)
-  uint8_t bit_idx = ((uint8_t)(((target_addr >> 4) * 0x9E3779B97F4A7C15ULL) >> 56)) >> 3;
+  indir_slot_t *indir_map_slots = (indir_slot_t *)__afl_indir_ptr;
+  // Multiplicative hash, then take top INDIR_BIT_SHIFT bits for bit index
+  uint8_t bit_idx = (uint8_t)(((target_addr >> 4) * 0x9E3779B97F4A7C15ULL) >> (64 - INDIR_BIT_SHIFT));
 
-  indir_map_32[*guard] |= (1U << bit_idx);
+  indir_map_slots[*guard] |= ((indir_slot_t)1 << bit_idx);
 }
