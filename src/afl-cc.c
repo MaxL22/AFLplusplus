@@ -3136,7 +3136,8 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
           "  AFL_USE_LSAN: activate leak-checker sanitizer\n"
           "  AFL_USE_RTSAN: activate realtime sanitizer\n"
           "  AFL_COMPILER_LAUNCHER: prepend command to compiler invocations "
-          "(e.g., ccache)\n");
+          "(e.g., ccache)\n"
+          "  AFL_LLVM_INDIRECT: activate indirect jumps tracking \n");
 
       if (aflcc->have_gcc_plugin)
         SAYF(
