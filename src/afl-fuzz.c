@@ -2689,7 +2689,11 @@ int main(int argc, char **argv_orig, char **envp) {
   }
   // INDIR_CHANGE: Setup dummy size and env var
   if (afl->shm.indir_mode) {
-    afl->shm.indir_map_size = DEFAULT_INDIR_SHMEM_SIZE;
+    if (getenv(INDIR_MAP_SIZE_ENV_VAR)) {
+      afl->shm.indir_map_size = atoi(getenv(INDIR_MAP_SIZE_ENV_VAR));
+    } else {
+      afl->shm.indir_map_size = DEFAULT_INDIR_SHMEM_SIZE;
+    }
     char buf[32];
     snprintf(buf, sizeof(buf), "%zu", afl->shm.indir_map_size);
     setenv(INDIR_MAP_SIZE_ENV_VAR, buf, 1); // It's just putting it as a string

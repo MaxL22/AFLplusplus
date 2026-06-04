@@ -929,7 +929,7 @@ static void __afl_map_shm(void) {
       __afl_indir_map_size = DEFAULT_INDIR_SHMEM_SIZE / sizeof(uint32_t);
   }
   // Uses the env var only if bigger
-  if (env_indir_val > (DEFAULT_INDIR_SHMEM_SIZE / sizeof(uint32_t)) && env_indir_val > __afl_indir_map_size) {
+  if (env_indir_val > __afl_indir_map_size) {
       __afl_indir_map_size = env_indir_val;
   }
 
