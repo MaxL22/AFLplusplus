@@ -275,7 +275,7 @@ inline u8 has_new_bits(afl_state_t *afl, u8 *virgin_map) {
 // INDIR_CHANGE
 // Returns 1 if new coverage is found, 0 otherwise
 // This is kind of a copy of the one above
-inline u8 has_indir_new_bits(afl_state_t *afl) {
+static inline u8 has_indir_new_bits(afl_state_t *afl) {
 
 #ifdef WORD_SIZE_64
   u64 *current = (u64 *)afl->fsrv.indir_bits;

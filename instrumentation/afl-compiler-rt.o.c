@@ -937,6 +937,16 @@ static void __afl_map_shm(void) {
     fprintf(stderr, "DEBUG: Indirect jumps map size: %u\n", __afl_indir_map_size);
   }
 
+  // INDIR_CHANGE: check that the indir map is not too small (prevent OOB read)
+  if (__afl_indir_map_size * sizeof(indir_slot_t) > 4096) {
+    if (__afl_indir_initial != __afl_indir_ptr_dummy) { free(__afl_indir_ptr_dummy); }
+    __afl_indir_ptr_dummy = (u8 *)malloc(__afl_indir_map_size * sizeof(indir_slot_t));
+    if (!__afl_indir_ptr_dummy) {
+      fprintf(stderr, "Error: AFL++ could not acquire %zu bytes of memory for indir map, exiting!\n", (size_t)(__afl_indir_map_size * sizeof(indir_slot_t)));
+      exit(-1);
+    }
+  }
+
   if (id_str) {
 #ifdef USEMMAP
     const char     *shm_file_path = id_str;
@@ -963,17 +973,28 @@ static void __afl_map_shm(void) {
       exit(2);
     }
 
-    __afl_indir_ptr = shm_base;
+    // INDIR_CHANGE: use dummy if map too smol
+    if (env_indir_val == 0 || __afl_indir_map_size <= env_indir_val) {
+      __afl_indir_ptr = shm_base;
+    } else {
+      __afl_indir_ptr = __afl_indir_ptr_dummy;
+    }
     close(shm_fd);
     shm_fd = -1;
 #else
     u32 shm_id = atoi(id_str);
-    __afl_indir_ptr = (u8 *)shmat(shm_id, NULL, 0);
+    u8 *shm_base = (u8 *)shmat(shm_id, NULL, 0);
 
-    if (!__afl_indir_ptr|| __afl_indir_ptr== (void *)-1) {
+    if (!shm_base || shm_base == (void *)-1) {
       perror("shmat for indir map");
       send_forkserver_error(FS_ERROR_SHM_OPEN);
       _exit(1);
+    }
+    // INDIR_CHANGE: as above, if map too smol ...
+    if (env_indir_val == 0 || __afl_indir_map_size <= env_indir_val) {
+      __afl_indir_ptr = shm_base;
+    } else {
+      __afl_indir_ptr = __afl_indir_ptr_dummy;
     }
 #endif
   } else {
