@@ -2483,10 +2483,17 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
       fprintf(stderr, "[-] FATAL: forkserver already up, indir dlopen'd\n");
       abort();
     }
+    // INDIR_CHANGE: Fix OOB when __afl_indir_final_loc <= 1 and allow using last slot.
+    if (__afl_indir_final_loc <= 1) {
+      while (start < stop) {
+        *(start++) = 0;
+      }
+      return;
+    }
     static u32 offset = 2;
     while (start < stop) {
       *(start++) = offset;
-      if (++offset >= __afl_indir_final_loc) offset = 2;
+      if (++offset > __afl_indir_final_loc) offset = 2;
     }
     return;
   }
