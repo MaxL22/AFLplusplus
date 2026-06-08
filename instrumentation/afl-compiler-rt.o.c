@@ -1129,12 +1129,15 @@ static void __afl_unmap_shm(void) {
   // INDIR_CHANGE: cleanup, as above
   id_str = getenv(INDIR_SHM_ENV_VAR);
   if (id_str) {
+    if (__afl_indir_ptr && __afl_indir_ptr != __afl_indir_initial &&
+        __afl_indir_ptr != __afl_indir_ptr_dummy) {
 #ifdef USEMMAP
-    munmap((void *)__afl_indir_ptr, __afl_indir_map_size * sizeof(indir_slot_t));
+      munmap((void *)__afl_indir_ptr, __afl_indir_map_size * sizeof(indir_slot_t));
 #else
-    shmdt((void *)__afl_indir_ptr);
+      shmdt((void *)__afl_indir_ptr);
 #endif
-  __afl_indir_ptr= __afl_indir_ptr_dummy;
+    }
+    __afl_indir_ptr = __afl_indir_ptr_dummy;
   }
 
   __afl_already_initialized_shm = 0;
@@ -2490,6 +2493,17 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 
   while (start < stop) {
     *(start++) = ++__afl_indir_final_loc;
+  }
+
+  if (__afl_already_initialized_shm) {
+    if (__afl_indir_final_loc + 1 > __afl_indir_map_size) {
+      if (__afl_debug) {
+        fprintf(stderr, "DEBUG: Reinit shm necessary for indir (+%u)\n",
+                __afl_indir_final_loc + 1 - __afl_indir_map_size);
+      }
+      __afl_unmap_shm();
+      __afl_map_shm();
+    }
   }
 
   __afl_indir_map_size = __afl_indir_final_loc + 1;
