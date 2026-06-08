@@ -48,7 +48,10 @@
 #ifndef INDIR_SLOT_SIZE
 #define INDIR_SLOT_SIZE 64
 #endif
-#define DEFAULT_INDIR_SHMEM_SIZE (512 * INDIR_SLOT_SIZE / 8)
+// #define DEFAULT_INDIR_SHMEM_SIZE (512 * INDIR_SLOT_SIZE / 8)
+// TEMP FIX: size should just be "big enough", it is currently NOT working
+// it crashes during initialization
+#define DEFAULT_INDIR_SHMEM_SIZE 65536
 #define INDIR_MAP_SIZE_ENV_VAR "AFL_INDIR_MAP_SIZE"
 
 /* Default time until when no more coverage finds are happening afl-fuzz
