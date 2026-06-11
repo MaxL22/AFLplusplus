@@ -100,7 +100,8 @@ void write_bitmap(afl_state_t *afl) {
   // Write the bitmap to resume
   // It is currently NOT fully implemented
   if (afl->shm.indir_mode) {
-    ck_write(fd, afl->indir_virgin_bits, afl->shm.indir_map_size, fname);
+    // fsrv and not shm cus we want to write only the actual size
+    ck_write(fd, afl->indir_virgin_bits, afl->fsrv.indir_map_size, fname);
   }
 
   close(fd);
@@ -147,7 +148,7 @@ u32 count_bits(afl_state_t *afl, u8 *mem) {
 // INDIR_CHANGE
 u32 count_indir_bits(afl_state_t *afl) {
   u32 *ptr = (u32 *)afl->indir_virgin_bits;
-  u32 i = (afl->shm.indir_map_size >> 2);
+  u32 i = (afl->fsrv.indir_map_size >> 2);
   u32 ret = 0;
 
   // Counting zeros: we have the virgin map, bits are set to zero as they are discovered
@@ -280,11 +281,11 @@ static inline u8 has_indir_new_bits(afl_state_t *afl) {
 #ifdef WORD_SIZE_64
   u64 *current = (u64 *)afl->fsrv.indir_bits;
   u64 *virgin  = (u64 *)afl->indir_virgin_bits;
-  u32 i = (afl->shm.indir_map_size >> 3); // divide by 8
+  u32 i = (afl->fsrv.indir_map_size >> 3); // divide by 8
 #else
   u32 *current = (u32 *)afl->fsrv.indir_bits;
   u32 *virgin  = (u32 *)afl->indir_virgin_bits;
-  u32 i = (afl->shm.indir_map_size >> 2); // divide by 4
+  u32 i = (afl->fsrv.indir_map_size >> 2); // divide by 4
 #endif
 
   u8 ret = 0;

@@ -2513,7 +2513,10 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     }
   }
 
-  __afl_indir_map_size = __afl_indir_final_loc + 1;
+  // INDIR_CHANGE: only expand, never shrink
+  if (__afl_indir_final_loc + 1 > __afl_indir_map_size) {
+    __afl_indir_map_size = __afl_indir_final_loc + 1;
+  }
 }
 
 ///// CmpLog instrumentation

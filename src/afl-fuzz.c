@@ -2691,6 +2691,12 @@ int main(int argc, char **argv_orig, char **envp) {
   if (afl->shm.indir_mode) {
     if (getenv(INDIR_MAP_SIZE_ENV_VAR)) {
       afl->shm.indir_map_size = atoi(getenv(INDIR_MAP_SIZE_ENV_VAR));
+      // INDIR_CHANGE
+      // align to 64 bytes so bitmap iteration functions (which process data in u32/u64 chunks)
+      // don't skip trailing bytes
+      if (afl->shm.indir_map_size % 64) {
+        afl->shm.indir_map_size = (((afl->shm.indir_map_size + 63) >> 6) << 6);
+      }
     } else {
       afl->shm.indir_map_size = DEFAULT_INDIR_SHMEM_SIZE;
     }
@@ -2740,6 +2746,11 @@ int main(int argc, char **argv_orig, char **envp) {
 
     // INDIR_CHANGE: Dynamic shm resize for indir_map_size
     u32 new_indir_map_size = afl->shm.indir_mode ? afl->fsrv.indir_map_size : 0;
+    if (new_indir_map_size > 0) {
+      char vbuf_indir[16];
+      snprintf(vbuf_indir, sizeof(vbuf_indir), "%u", new_indir_map_size);
+      setenv(INDIR_MAP_SIZE_ENV_VAR, vbuf_indir, 1);
+    }
     bool needs_resize = (map_size < new_map_size);
     bool indir_needs_resize = (new_indir_map_size > 0 && afl->shm.indir_map_size < new_indir_map_size);
 
@@ -2758,13 +2769,14 @@ int main(int argc, char **argv_orig, char **envp) {
           afl->fsrv.map_size = new_map_size;
       }
       if (indir_needs_resize) {
+          // INDIR_CHANGE: use ck_realloc to preserve existing coverage data
+          // instead of ck_free + ck_alloc 
+          u32 old_indir_size = afl->shm.indir_map_size;
           afl->shm.indir_map_size = new_indir_map_size;
-          ck_free(afl->indir_virgin_bits);
-          afl->indir_virgin_bits = ck_alloc(new_indir_map_size);
-          memset(afl->indir_virgin_bits, 255, new_indir_map_size);
-          char vbuf_indir[16];
-          snprintf(vbuf_indir, sizeof(vbuf_indir), "%u", new_indir_map_size);
-          setenv(INDIR_MAP_SIZE_ENV_VAR, vbuf_indir, 1);
+          afl->indir_virgin_bits = ck_realloc(afl->indir_virgin_bits, new_indir_map_size);
+          if (new_indir_map_size > old_indir_size) {
+            memset(afl->indir_virgin_bits + old_indir_size, 255, new_indir_map_size - old_indir_size);
+          }
       }
 
       afl->fsrv.trace_bits =
