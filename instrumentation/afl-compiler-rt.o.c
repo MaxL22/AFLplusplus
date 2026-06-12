@@ -2483,6 +2483,10 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
       fprintf(stderr, "[-] FATAL: forkserver already up, indir dlopen'd\n");
       abort();
     }
+
+    // INDIR_CHANGE: Check if user explicitly requested to ignore coverage from the DSO
+    u8 ignore_dso_after_fs = !!getenv("AFL_IGNORE_PROBLEMS_COVERAGE");
+
     // INDIR_CHANGE: Fix OOB when __afl_indir_final_loc <= 1 and allow using last slot.
     if (__afl_indir_final_loc <= 1) {
       while (start < stop) {
@@ -2492,8 +2496,13 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     }
     static u32 offset = 2;
     while (start < stop) {
-      *(start++) = offset;
-      if (++offset > __afl_indir_final_loc) offset = 2;
+      // INDIR_CHANGE: ignore coverage from DSO
+      if (!ignore_dso_after_fs) {
+        *(start++) = offset;
+        if (++offset > __afl_indir_final_loc) offset = 2;
+      } else {
+        *(start++) = 0;
+      }
     }
     return;
   }

@@ -2768,6 +2768,10 @@ int main(int argc, char **argv_orig, char **envp) {
       if (needs_resize) {
           afl->fsrv.map_size = new_map_size;
       }
+      //INDIR_CHANGE: we're de-inizializing all shms, might as well resize them both
+      if (needs_resize && !indir_needs_resize && new_indir_map_size > 0) {
+        afl->shm.indir_map_size = new_indir_map_size;
+      }
       if (indir_needs_resize) {
           // INDIR_CHANGE: use ck_realloc to preserve existing coverage data
           // instead of ck_free + ck_alloc 
@@ -3008,6 +3012,9 @@ int main(int argc, char **argv_orig, char **envp) {
           afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode,
                        afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
       afl->cmplog_fsrv.trace_bits = afl->fsrv.trace_bits;
+      // INDIR_CHANGE: sync up different sizes
+      afl->fsrv.indir_bits = afl->shm.indir_map;
+      afl->cmplog_fsrv.indir_bits = afl->fsrv.indir_bits; // idk if cmplog actually works (I don't think so)
 
   #ifdef __AFL_CODE_COVERAGE
       if (getenv("AFL_DUMP_PC_MAP")) { afl_pcmap_resize(afl, new_map_size); }
@@ -3303,6 +3310,10 @@ int main(int argc, char **argv_orig, char **envp) {
     if (afl->in_bitmap) {
 
       read_bitmap(afl->in_bitmap, afl->virgin_bits, afl->fsrv.map_size);
+      // INDIR_CHANGE: to read bitmap for bitmap option
+      if (afl->shm.indir_mode) {
+        read_bitmap_offset(afl->in_bitmap, afl->indir_virgin_bits, afl->fsrv.indir_map_size, afl->fsrv.map_size);
+      }
 
     } else {
 

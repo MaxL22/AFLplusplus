@@ -996,6 +996,21 @@ void read_bitmap(u8 *fname, u8 *map, size_t len) {
 
 }
 
+// INDIR_CHANGE: this is new, I guess
+void read_bitmap_offset(u8 *fname, u8 *map, size_t len, off_t offset) {
+
+  s32 fd = open(fname, O_RDONLY);
+
+  if (fd < 0) { PFATAL("Unable to open '%s'", fname); }
+
+  if (lseek(fd, offset, SEEK_SET) == -1) { PFATAL("Unable to lseek in '%s'", fname); }
+
+  ck_read(fd, map, len, fname);
+
+  close(fd);
+
+}
+
 /* Get unix time in milliseconds */
 
 inline u64 get_cur_time(void) {

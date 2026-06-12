@@ -88,6 +88,8 @@ void configure_afl_kill_signals(afl_forkserver_t *fsrv,
    This is for the -B option again. */
 
 void read_bitmap(u8 *fname, u8 *map, size_t len);
+// INDIR_CHANGE: changed to fit new resume logic
+void read_bitmap_offset(u8 *fname, u8 *map, size_t len, off_t offset);
 
 /* Get unix time in milliseconds */
 
