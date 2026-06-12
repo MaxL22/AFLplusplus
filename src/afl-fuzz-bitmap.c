@@ -360,6 +360,20 @@ void minimize_bits(afl_state_t *afl, u8 *dst, u8 *src) {
 
 }
 
+// INDIR_CHANGE: this is a copy of the above one, nothing too serious
+void minimize_indir_bits(afl_state_t *afl, u8 *dst, u8 *src) {
+
+  u32 i = 0;
+
+  while (i < afl->shm.indir_map_size) {
+
+    if (*(src++)) { dst[i >> 3] |= 1 << (i & 7); }
+    ++i;
+
+  }
+
+}
+
 #ifndef SIMPLE_FILES
 
 /* Construct a file name for a new test case, capturing the operation

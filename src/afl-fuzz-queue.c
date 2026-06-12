@@ -34,6 +34,7 @@ void minimize_bits(afl_state_t *afl, u8 *dst, u8 *src) {
 
 }
 
+
 void run_afl_custom_queue_new_entry(afl_state_t *afl, struct queue_entry *q,
                                     u8 *a, u8 *b) {
 
@@ -465,6 +466,14 @@ void mark_as_redundant(afl_state_t *afl, struct queue_entry *q, u8 state) {
 
     }
 
+    // INDIR_CHANGE: idk, it does the same thing above
+    if (unlikely(q->trace_mini_indir)) {
+
+      ck_free(q->trace_mini_indir);
+      q->trace_mini_indir = NULL;
+
+    }
+
   }
 
   if (state) {
@@ -779,6 +788,8 @@ void destroy_queue(afl_state_t *afl) {
     ck_free(q->testcase_buf);
     ck_free(q->fname);
     ck_free(q->trace_mini);
+    // INDIR_CHANGE: If we need to destroy, we need to destroy EVERYTHING
+    ck_free(q->trace_mini_indir);
     if (q->skipdet_e) {
 
       if (q->skipdet_e->done_inf_map) ck_free(q->skipdet_e->done_inf_map);
@@ -927,6 +938,51 @@ void update_bitmap_score(afl_state_t *afl, struct queue_entry *q,
 
     }
 
+    // INDIR_CHANGE: this is kinda big, this updates the scored based on the indir map
+    if (afl->shm.indir_mode && afl->fsrv.indir_bits && afl->indir_top_rated) {
+      for (i = 0; i < afl->shm.indir_map_size; ++i) {
+        if (afl->fsrv.indir_bits[i]) {
+          if (afl->indir_top_rated[i]) {
+            u64 top_rated_fav_factor;
+            u64 top_rated_fuzz_p2;
+
+            if (unlikely(afl->schedule >= FAST && afl->schedule < RARE)) {
+              top_rated_fuzz_p2 = 0;
+            } else if (unlikely(afl->schedule == RARE)) {
+              top_rated_fuzz_p2 = next_pow2(afl->n_fuzz[afl->indir_top_rated[i]->n_fuzz_entry]);
+            } else {
+              top_rated_fuzz_p2 = afl->indir_top_rated[i]->fuzz_level;
+            }
+
+            if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
+              top_rated_fav_factor = afl->indir_top_rated[i]->len << 2;
+            } else {
+              top_rated_fav_factor = afl->indir_top_rated[i]->exec_us * afl->indir_top_rated[i]->len;
+            }
+
+            if (likely(fuzz_p2 > top_rated_fuzz_p2)) { continue; }
+            if (likely(fav_factor > top_rated_fav_factor)) { continue; }
+
+            if (!--afl->indir_top_rated[i]->tc_ref_indir) {
+              ck_free(afl->indir_top_rated[i]->trace_mini_indir);
+              afl->indir_top_rated[i]->trace_mini_indir = NULL;
+            }
+          }
+
+          afl->indir_top_rated[i] = q;
+          ++q->tc_ref_indir;
+
+          if (!q->trace_mini_indir) {
+            u32 indir_len = ((afl->shm.indir_map_size + 7) >> 3);
+            q->trace_mini_indir = (u8 *)ck_alloc(indir_len);
+            minimize_indir_bits(afl, q->trace_mini_indir, afl->fsrv.indir_bits);
+          }
+
+          afl->score_changed = 1;
+        }
+      }
+    }
+
   }
 
 }
@@ -1005,6 +1061,37 @@ void cull_queue(afl_state_t *afl) {
 
   }
 
+  // INDIR_CHANGE: as above, indir
+  if (afl->shm.indir_mode && afl->indir_top_rated) {
+    u32 indir_len = (afl->shm.indir_map_size + 7) >> 3;
+    u8 *temp_v_indir = ck_alloc(indir_len);
+    memset(temp_v_indir, 255, indir_len);
+
+    for (i = 0; i < afl->shm.indir_map_size; ++i) {
+      if (afl->indir_top_rated[i] && (temp_v_indir[i >> 3] & (1 << (i & 7))) &&
+          afl->indir_top_rated[i]->trace_mini_indir) {
+        u32 j = indir_len;
+        while (j--) {
+          if (afl->indir_top_rated[i]->trace_mini_indir[j]) {
+            temp_v_indir[j] &= ~afl->indir_top_rated[i]->trace_mini_indir[j];
+          }
+        }
+        if (!afl->indir_top_rated[i]->favored && !afl->indir_top_rated[i]->disabled) {
+          afl->indir_top_rated[i]->favored = 1;
+          ++afl->queued_favored;
+          if (!afl->indir_top_rated[i]->was_fuzzed) {
+            ++afl->pending_favored;
+            if (unlikely(afl->smallest_favored < 0 ||
+                         afl->smallest_favored > (s64)afl->indir_top_rated[i]->id)) {
+              afl->smallest_favored = (s64)afl->indir_top_rated[i]->id;
+            }
+          }
+        }
+      }
+    }
+    ck_free(temp_v_indir);
+  }
+
   for (i = 0; i < afl->queued_items; i++) {
 
     if (likely(!afl->queue_buf[i]->disabled)) {
@@ -1073,6 +1160,29 @@ void recalculate_all_scores(afl_state_t *afl) {
 
       }
 
+      // INDIR_CHANGE: again, as above
+      if (afl->shm.indir_mode && afl->fsrv.indir_bits && afl->indir_top_rated_candidates) {
+        for (j = 0; j < afl->shm.indir_map_size; ++j) {
+          if (afl->fsrv.indir_bits[j]) {
+            u32 *candidate_ids = afl->indir_top_rated_candidates[j];
+            u32  id = afl->queue_buf[i]->id;
+
+            if (!candidate_ids) {
+              candidate_ids = ck_alloc(sizeof(u32) * 2);
+              candidate_ids[0] = 1;
+              candidate_ids[1] = id;
+            } else {
+              u32 count = candidate_ids[0];
+              candidate_ids =
+                  ck_realloc(candidate_ids, sizeof(u32) * (count + 2));
+              candidate_ids[0] = count + 1;
+              candidate_ids[count + 1] = id;
+            }
+            afl->indir_top_rated_candidates[j] = candidate_ids;
+          }
+        }
+      }
+
     }
 
     afl->last_scored_idx = i;
@@ -1096,6 +1206,21 @@ void recalculate_all_scores(afl_state_t *afl) {
 
     }
 
+  }
+
+  // INDIR_CHANGE: as above, once again
+  if (afl->shm.indir_mode && afl->indir_top_rated_candidates) {
+    for (i = 0; i < afl->shm.indir_map_size; ++i) {
+      u32 *candidate_ids = afl->indir_top_rated_candidates[i];
+      if (candidate_ids) {
+        u32 count = candidate_ids[0];
+        for (u32 k = 0; k < count; k++) {
+          u32                 id = candidate_ids[k + 1];
+          struct queue_entry *entry = afl->queue_buf[id];
+          update_bitmap_indir_rescore(afl, entry, i);
+        }
+      }
+    }
   }
 
 }
@@ -1194,6 +1319,101 @@ void update_bitmap_rescore(afl_state_t *afl, struct queue_entry *q, u32 index) {
     u32 len = (afl->fsrv.map_size >> 3);
     q->trace_mini = (u8 *)ck_alloc(len);
     minimize_bits(afl, q->trace_mini, afl->fsrv.trace_bits);
+
+  }
+
+  afl->score_changed = 1;
+
+}
+
+// INDIR_CHANGE: indir copy of the function above
+void update_bitmap_indir_rescore(afl_state_t *afl, struct queue_entry *q, u32 index) {
+
+  u32 i = index;
+  u64 fav_factor;
+  u64 fuzz_p2;
+
+  if (unlikely(q->disabled)) { return; }
+
+  if (unlikely(afl->schedule >= FAST && afl->schedule < RARE)) {
+
+    fuzz_p2 = 0;  // Skip the fuzz_p2 comparison
+
+  } else if (unlikely(afl->schedule == RARE)) {
+
+    fuzz_p2 = next_pow2(afl->n_fuzz[q->n_fuzz_entry]);
+
+  } else {
+
+    fuzz_p2 = q->fuzz_level;
+
+  }
+
+  if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
+
+    fav_factor = q->len << 2;
+
+  } else {
+
+    fav_factor = q->exec_us * q->len;
+
+  }
+
+  if (afl->indir_top_rated[i]) {
+
+    /* Faster-executing or smaller test cases are favored. */
+    u64 top_rated_fav_factor;
+    u64 top_rated_fuzz_p2;
+
+    if (unlikely(afl->schedule >= FAST && afl->schedule < RARE)) {
+
+      top_rated_fuzz_p2 = 0;  // Skip the fuzz_p2 comparison
+
+    } else if (unlikely(afl->schedule == RARE)) {
+
+      top_rated_fuzz_p2 =
+          next_pow2(afl->n_fuzz[afl->indir_top_rated[i]->n_fuzz_entry]);
+
+    } else {
+
+      top_rated_fuzz_p2 = afl->indir_top_rated[i]->fuzz_level;
+
+    }
+
+    if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
+
+      top_rated_fav_factor = afl->indir_top_rated[i]->len << 2;
+
+    } else {
+
+      top_rated_fav_factor =
+          afl->indir_top_rated[i]->exec_us * afl->indir_top_rated[i]->len;
+
+    }
+
+    if (likely(fuzz_p2 > top_rated_fuzz_p2)) { return; }
+
+    if (likely(fav_factor > top_rated_fav_factor)) { return; }
+
+    if (!--afl->indir_top_rated[i]->tc_ref_indir) {
+
+      ck_free(afl->indir_top_rated[i]->trace_mini_indir);
+      afl->indir_top_rated[i]->trace_mini_indir = NULL;
+
+    }
+
+  }
+
+  /* Insert ourselves as the new winner. */
+
+  afl->indir_top_rated[i] = q;
+  ++q->tc_ref_indir;
+
+  if (!q->trace_mini_indir) {
+
+    u32 len = ((afl->shm.indir_map_size + 7) >> 3);
+    q->trace_mini_indir = (u8 *)ck_alloc(len);
+    minimize_indir_bits(afl, q->trace_mini_indir, afl->fsrv.indir_bits);
 
   }
 
@@ -1452,6 +1672,8 @@ u32 calculate_score(afl_state_t *afl, struct queue_entry *q) {
       // increase the score for every bitmap byte for which this entry
       // is the top contender
       perf_score += (q->tc_ref * 10);
+      // INDIR_CHANGE: indir score added to the perf
+      perf_score += (q->tc_ref_indir * 10);
       // the more often fuzz result paths are equal to this queue entry,
       // reduce its value
       perf_score *= (1 - (double)((double)afl->n_fuzz[q->n_fuzz_entry] /

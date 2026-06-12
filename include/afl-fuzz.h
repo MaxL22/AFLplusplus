@@ -296,6 +296,9 @@ struct queue_entry {
       stats_mutated;                    /* stats: # of mutations performed  */
 
   u32 tc_ref;                           /* Trace bytes ref count            */
+  // INDIR_CHANGE: new param for indir stuff
+  u32 tc_ref_indir;                     /* Indirect trace bytes ref count   */
+
 
 #ifdef INTROSPECTION
   u32 bitsmap_size;
@@ -306,6 +309,8 @@ struct queue_entry {
 
   struct queue_entry *mother;            /* queue entry this based on        */
   u8                 *trace_mini;        /* Trace bytes, if kept             */
+  // INDIR_CHANGE: same as above, but indir
+  u8                 *trace_mini_indir;  /* Indirect trace bytes, if kept    */
   u8                 *testcase_buf;      /* The testcase buffer, if loaded.  */
   u8                 *cmplog_colorinput; /* the result buf of colorization   */
   struct tainted     *taint;             /* Taint information from CmpLog    */
@@ -803,6 +808,10 @@ typedef struct afl_state {
   struct queue_entry **queue_buf;
 
   struct queue_entry **top_rated;           /* Top entries for bitmap bytes */
+  // INDIR_CHANGE: new list of top entries (everybody cheer)
+  struct queue_entry **indir_top_rated;     /* Top entries for indir map bytes */
+  u32 **indir_top_rated_candidates;
+
 
   u32 **top_rated_candidates;             /* Candidate IDs per bitmap index */
 
@@ -1293,6 +1302,9 @@ void cull_queue(afl_state_t *);
 u32  calculate_score(afl_state_t *, struct queue_entry *);
 void recalculate_all_scores(afl_state_t *);
 void update_bitmap_rescore(afl_state_t *, struct queue_entry *, u32);
+// New functions for indir bitmap scoring
+void update_bitmap_indir_rescore(afl_state_t *, struct queue_entry *, u32);
+void minimize_indir_bits(afl_state_t *afl, u8 *dst, u8 *src);
 
 /* Bitmap */
 

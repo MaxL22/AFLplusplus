@@ -2713,6 +2713,8 @@ int main(int argc, char **argv_orig, char **envp) {
   if (afl->shm.indir_mode) {
     afl->indir_virgin_bits = ck_alloc(afl->shm.indir_map_size);
     memset(afl->indir_virgin_bits, 255, afl->shm.indir_map_size);
+    afl->indir_top_rated = ck_alloc(afl->shm.indir_map_size * sizeof(struct queue_entry *));
+    afl->indir_top_rated_candidates = ck_alloc(afl->shm.indir_map_size * sizeof(u32 *));
   }
   // link indir_bits and initialized map
   afl->fsrv.indir_bits = afl->shm.indir_map;
@@ -2778,8 +2780,12 @@ int main(int argc, char **argv_orig, char **envp) {
           u32 old_indir_size = afl->shm.indir_map_size;
           afl->shm.indir_map_size = new_indir_map_size;
           afl->indir_virgin_bits = ck_realloc(afl->indir_virgin_bits, new_indir_map_size);
+          afl->indir_top_rated = ck_realloc(afl->indir_top_rated, new_indir_map_size * sizeof(struct queue_entry *));
+          afl->indir_top_rated_candidates = ck_realloc(afl->indir_top_rated_candidates, new_indir_map_size * sizeof(u32 *));
           if (new_indir_map_size > old_indir_size) {
             memset(afl->indir_virgin_bits + old_indir_size, 255, new_indir_map_size - old_indir_size);
+            memset(afl->indir_top_rated + old_indir_size, 0, (new_indir_map_size - old_indir_size) * sizeof(struct queue_entry *));
+            memset(afl->indir_top_rated_candidates + old_indir_size, 0, (new_indir_map_size - old_indir_size) * sizeof(u32 *));
           }
       }
 

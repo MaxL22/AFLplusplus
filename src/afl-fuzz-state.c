@@ -920,6 +920,15 @@ void afl_state_deinit(afl_state_t *afl) {
 
   // INDIR_CHANGE
   if (afl->shm.indir_mode) { ck_free(afl->indir_virgin_bits); }
+  if (afl->indir_top_rated) { ck_free(afl->indir_top_rated); } // Deinit queue stuff
+  if (afl->indir_top_rated_candidates) {
+    for (u32 i = 0; i < afl->shm.indir_map_size; i++) {
+      if (afl->indir_top_rated_candidates[i]) {
+        ck_free(afl->indir_top_rated_candidates[i]);
+      }
+    }
+    ck_free(afl->indir_top_rated_candidates);
+  }
 
   if (afl->in_place_resume) { ck_free(afl->in_dir); }
   if (afl->sync_id) { ck_free(afl->out_dir); }
