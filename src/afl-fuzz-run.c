@@ -610,8 +610,13 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
 
     classify_counts(&afl->fsrv);
     cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
+    // INDIR_CHANGE: checksum for indir
+    u64 indir_cksum = 0;
+    if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
+      indir_cksum = hash64(afl->fsrv.indir_bits, afl->fsrv.indir_map_size, HASH_CONST);
+    }
 
-    if (unlikely(q->exec_cksum != cksum)) {
+    if (unlikely(q->exec_cksum != cksum || (afl->shm.indir_mode && q->indir_cksum != indir_cksum))) {
 
       hnb = has_new_bits(afl, afl->virgin_bits);
 
@@ -656,6 +661,10 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
       } else {
 
         q->exec_cksum = cksum;
+        // INDIR_CHANGE: indir checksum
+        if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
+          q->indir_cksum = indir_cksum;
+        }
         memcpy(afl->first_trace, afl->fsrv.trace_bits, afl->fsrv.map_size);
 
       }
@@ -693,10 +702,17 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
   if (unlikely(!q->exec_us)) { q->exec_us = 1; }
 
   q->bitmap_size = count_bytes(afl, afl->fsrv.trace_bits);
+  // INDIR_CHANGE: count indir bits
+  if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
+    q->indir_bitmap_size = count_indir_bits_run(afl, afl->fsrv.indir_bits);
+  }
   q->handicap = handicap;
   q->cal_failed = 0;
 
   afl->total_bitmap_size += q->bitmap_size;
+  if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
+    afl->total_indir_bitmap_size += q->indir_bitmap_size;
+  }
   ++afl->total_bitmap_entries;
 
   update_bitmap_score(afl, q, true);
@@ -1254,13 +1270,18 @@ u8 trim_case(afl_state_t *afl, struct queue_entry *q, u8 *in_buf) {
       ++afl->trim_execs;
       classify_counts(&afl->fsrv);
       cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
+      // INDIR_CHANGE: indir checksum
+      u64 indir_cksum = 0;
+      if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
+        indir_cksum = hash64(afl->fsrv.indir_bits, afl->fsrv.indir_map_size, HASH_CONST);
+      }
 
       /* If the deletion had no impact on the trace, make it permanent. This
          isn't perfect for variable-path inputs, but we're just making a
          best-effort pass, so it's not a big deal if we end up with false
          negatives every now and then. */
 
-      if (cksum == q->exec_cksum) {
+      if (cksum == q->exec_cksum && (!afl->shm.indir_mode || indir_cksum == q->indir_cksum)) {
 
         u32 move_tail = q->len - remove_pos - trim_avail;
 

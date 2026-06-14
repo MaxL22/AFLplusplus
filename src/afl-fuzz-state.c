@@ -919,10 +919,14 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
 void afl_state_deinit(afl_state_t *afl) {
 
   // INDIR_CHANGE
-  if (afl->shm.indir_mode) { ck_free(afl->indir_virgin_bits); }
+  if (afl->shm.indir_mode) {
+    ck_free(afl->indir_virgin_bits);
+    ck_free(afl->indir_virgin_tmout);
+    ck_free(afl->indir_virgin_crash);
+  }
   if (afl->indir_top_rated) { ck_free(afl->indir_top_rated); } // Deinit queue stuff
   if (afl->indir_top_rated_candidates) {
-    for (u32 i = 0; i < afl->shm.indir_map_size; i++) {
+    for (u32 i = 0; i < afl->shm.indir_map_size * 8; i++) {
       if (afl->indir_top_rated_candidates[i]) {
         ck_free(afl->indir_top_rated_candidates[i]);
       }

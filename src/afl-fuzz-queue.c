@@ -940,8 +940,8 @@ void update_bitmap_score(afl_state_t *afl, struct queue_entry *q,
 
     // INDIR_CHANGE: this is kinda big, this updates the scored based on the indir map
     if (afl->shm.indir_mode && afl->fsrv.indir_bits && afl->indir_top_rated) {
-      for (i = 0; i < afl->shm.indir_map_size; ++i) {
-        if (afl->fsrv.indir_bits[i]) {
+      for (i = 0; i < afl->shm.indir_map_size * 8; ++i) {
+        if (afl->fsrv.indir_bits[i >> 3] & (1 << (i & 7))) {
           if (afl->indir_top_rated[i]) {
             u64 top_rated_fav_factor;
             u64 top_rated_fuzz_p2;
@@ -973,7 +973,7 @@ void update_bitmap_score(afl_state_t *afl, struct queue_entry *q,
           ++q->tc_ref_indir;
 
           if (!q->trace_mini_indir) {
-            u32 indir_len = ((afl->shm.indir_map_size + 7) >> 3);
+            u32 indir_len = afl->shm.indir_map_size;
             q->trace_mini_indir = (u8 *)ck_alloc(indir_len);
             minimize_indir_bits(afl, q->trace_mini_indir, afl->fsrv.indir_bits);
           }
@@ -1063,11 +1063,11 @@ void cull_queue(afl_state_t *afl) {
 
   // INDIR_CHANGE: as above, indir
   if (afl->shm.indir_mode && afl->indir_top_rated) {
-    u32 indir_len = (afl->shm.indir_map_size + 7) >> 3;
+    u32 indir_len = afl->shm.indir_map_size;
     u8 *temp_v_indir = ck_alloc(indir_len);
     memset(temp_v_indir, 255, indir_len);
 
-    for (i = 0; i < afl->shm.indir_map_size; ++i) {
+    for (i = 0; i < afl->shm.indir_map_size * 8; ++i) {
       if (afl->indir_top_rated[i] && (temp_v_indir[i >> 3] & (1 << (i & 7))) &&
           afl->indir_top_rated[i]->trace_mini_indir) {
         u32 j = indir_len;
@@ -1484,31 +1484,59 @@ u32 calculate_score(afl_state_t *afl, struct queue_entry *q) {
   /* Adjust score based on bitmap size. The working theory is that better
      coverage translates to better targets. Multiplier from 0.25x to 3x. */
 
+  // INDIR_CHANGE: Score is based on multiplier now
+  double multiplier = 1.0;
+
   if (q->bitmap_size * 0.3 > avg_bitmap_size) {
 
-    perf_score *= 3;
+    multiplier = 3.0;
 
   } else if (q->bitmap_size * 0.5 > avg_bitmap_size) {
 
-    perf_score *= 2;
+    multiplier = 2.0;
 
   } else if (q->bitmap_size * 0.75 > avg_bitmap_size) {
 
-    perf_score *= 1.5;
+    multiplier = 1.5;
 
   } else if (q->bitmap_size * 3 < avg_bitmap_size) {
 
-    perf_score *= 0.25;
+    multiplier = 0.25;
 
   } else if (q->bitmap_size * 2 < avg_bitmap_size) {
 
-    perf_score *= 0.5;
+    multiplier = 0.5;
 
   } else if (q->bitmap_size * 1.5 < avg_bitmap_size) {
 
-    perf_score *= 0.75;
+    multiplier = 0.75;
 
   }
+  // We now have a *new* multiplier, if higher, set std multiplier to indir one
+  if (afl->shm.indir_mode && afl->shm.indir_map_size) {
+    u32 avg_indir_bitmap_size = afl->total_indir_bitmap_size / bitmap_entries;
+    double indir_multiplier = 1.0;
+
+    if (q->indir_bitmap_size * 0.3 > avg_indir_bitmap_size) {
+      indir_multiplier = 3.0;
+    } else if (q->indir_bitmap_size * 0.5 > avg_indir_bitmap_size) {
+      indir_multiplier = 2.0;
+    } else if (q->indir_bitmap_size * 0.75 > avg_indir_bitmap_size) {
+      indir_multiplier = 1.5;
+    } else if (q->indir_bitmap_size * 3 < avg_indir_bitmap_size) {
+      indir_multiplier = 0.25;
+    } else if (q->indir_bitmap_size * 2 < avg_indir_bitmap_size) {
+      indir_multiplier = 0.5;
+    } else if (q->indir_bitmap_size * 1.5 < avg_indir_bitmap_size) {
+      indir_multiplier = 0.75;
+    }
+
+    if (indir_multiplier > multiplier) {
+      multiplier = indir_multiplier;
+    }
+  }
+
+  perf_score *= multiplier;
 
   /* Adjust score based on handicap. Handicap is proportional to how late
      in the game we learned about this path. Latecomers are allowed to run

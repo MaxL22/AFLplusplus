@@ -550,7 +550,13 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
     }
 
-    if (likely(retlen && cksum == q->exec_cksum)) {
+    // INDIR_CHANGE: checksum added for the indir bitmap
+    u64 indir_cksum = 0;
+    if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
+      indir_cksum = hash64(afl->fsrv.indir_bits, afl->fsrv.indir_map_size, HASH_CONST);
+    }
+
+    if (likely(retlen && cksum == q->exec_cksum && (!afl->shm.indir_mode || indir_cksum == q->indir_cksum))) {
 
       /* Let's save a clean trace, which will be needed by
          update_bitmap_score once we're done with the trimming stuff.

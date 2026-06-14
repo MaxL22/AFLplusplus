@@ -278,6 +278,8 @@ struct queue_entry {
       disabled;                         /* Is disabled from fuzz selection  */
 
   u32 bitmap_size,                      /* Number of bits set in bitmap     */
+      // INDIR_CHANGE
+      indir_bitmap_size,                /* Number of bits set in indir map  */
 #ifdef INTROSPECTION
       stats_selected,                   /* stats: how often selected        */
       stats_skipped,                    /* stats: how often skipped         */
@@ -292,6 +294,8 @@ struct queue_entry {
       handicap,                         /* Number of queue cycles behind    */
       depth,                            /* Path depth                       */
       exec_cksum,                       /* Checksum of the execution trace  */
+      // INDIR_CHANGE
+      indir_cksum,                      /* Checksum of the indir trace      */
       custom,                           /* Marker for custom mutators       */
       stats_mutated;                    /* stats: # of mutations performed  */
 
@@ -568,7 +572,9 @@ typedef struct afl_state {
 
   // INDIR_CHANGE
   u8 *indir_trace_bits,  // map
-    *indir_virgin_bits;  // coverage state
+    *indir_virgin_bits,  // coverage state
+    *indir_virgin_tmout, // timeouts state
+    *indir_virgin_crash; // crashes state
   
   /* Position of this state in the global states list */
   u32 _id;
@@ -791,6 +797,8 @@ typedef struct afl_state {
       total_cal_cycles;                 /* Total calibration cycles         */
 
   u64 total_bitmap_size,                /* Total bit count for all bitmaps  */
+      // INDIR_CHANGE
+      total_indir_bitmap_size,          /* Total bit count for all indir bitmaps */
       total_bitmap_entries;             /* Number of bitmaps counted        */
 
   s32 cpu_core_count,                   /* CPU core count                   */
@@ -1313,6 +1321,7 @@ u32  count_bits(afl_state_t *, u8 *);
 // INDIR_CHANGE
 u32 count_indir_bits(afl_state_t *afl);
 u32  count_bytes(afl_state_t *, u8 *);
+u32  count_indir_bits_run(afl_state_t *, u8 *);
 u32  count_non_255_bytes(afl_state_t *, u8 *);
 void simplify_trace(afl_state_t *, u8 *);
 #ifdef WORD_SIZE_64
