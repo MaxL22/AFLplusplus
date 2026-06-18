@@ -298,7 +298,7 @@ inline u8 has_new_bits(afl_state_t *afl, u8 *virgin_map) {
 // INDIR_CHANGE
 // Returns 1 if new coverage is found, 0 otherwise
 // This is kind of a copy of the one above
-static inline u8 has_indir_new_bits_map(afl_state_t *afl, u8 *indir_virgin_map) {
+inline u8 has_indir_new_bits_map(afl_state_t *afl, u8 *indir_virgin_map) {
 
   if (unlikely(afl->fsrv.indir_map_size % 8 != 0)) { FATAL("indir_map_size must be a multiple of 8"); }
 
@@ -819,6 +819,19 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
        goto */
     calculate_cksum_if_necessary(afl, &cksum, &cksumed, &classified);
     calculate_new_bits_if_necessary(afl, &new_bits, &bits_counted, &classified);
+
+    // INDIR_CALCULATIONS
+    if (afl->shm.indir_mode) {
+      if (!indir_bits_counted) {
+        indir_bits_counted = true;
+        if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
+          indir_new_bits = 1;
+        }
+      }
+      if (indir_new_bits) {
+        new_bits = 2;
+      }
+    }
 
 #ifndef SIMPLE_FILES
 

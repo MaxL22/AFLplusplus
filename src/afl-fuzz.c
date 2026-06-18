@@ -2794,6 +2794,15 @@ int main(int argc, char **argv_orig, char **envp) {
             memset(afl->indir_virgin_crash + old_indir_size, 255, new_indir_map_size - old_indir_size);
             memset(afl->indir_top_rated + old_indir_size * 8, 0, (new_indir_map_size - old_indir_size) * 8 * sizeof(struct queue_entry *));
             memset(afl->indir_top_rated_candidates + old_indir_size * 8, 0, (new_indir_map_size - old_indir_size) * 8 * sizeof(u32 *));
+            
+            // INDIR_CHANGE: Resize trace_mini_indir for all queued items to prevent out-of-bounds in cull_queue
+            for (u32 i = 0; i < afl->queued_items; i++) {
+              struct queue_entry *q = afl->queue_buf[i];
+              if (q && q->trace_mini_indir) {
+                q->trace_mini_indir = ck_realloc(q->trace_mini_indir, new_indir_map_size);
+                memset(q->trace_mini_indir + old_indir_size, 0, new_indir_map_size - old_indir_size);
+              }
+            }
           }
       }
 
@@ -3165,6 +3174,20 @@ int main(int argc, char **argv_orig, char **envp) {
 
         r += q_len + 1;
 
+      }
+
+      // INDIR_CHANGE: read trace_mini_indir
+      if (afl->shm.indir_mode) {
+        u8 indir_res[1] = {0};
+        ZLIBREAD(fr_fd, indir_res, 1, "check indir map");
+        if (indir_res[0]) {
+          u32 indir_m_len = afl->shm.indir_map_size;
+          q->trace_mini_indir = ck_alloc(indir_m_len);
+          ZLIBREAD(fr_fd, q->trace_mini_indir, indir_m_len, "trace_mini_indir");
+          r += indir_m_len + 1;
+        } else {
+          r += 1;
+        }
       }
 
       afl->total_bitmap_size += q->bitmap_size;
@@ -4056,6 +4079,19 @@ stop_fuzzing:
           ZLIBWRITE(fr_fd, q->trace_mini, m_len, "trace_mini");
           w += q_len + m_len + 1;
 
+        }
+
+        // INDIR_CHANGE: save trace_mini_indir
+        if (afl->shm.indir_mode) {
+          u32 indir_m_len = afl->shm.indir_map_size;
+          if (!q->trace_mini_indir) {
+            ZLIBWRITE(fr_fd, off, 1, "no_indir_mini");
+            w += 1;
+          } else {
+            ZLIBWRITE(fr_fd, on, 1, "yes_indir_mini");
+            ZLIBWRITE(fr_fd, q->trace_mini_indir, indir_m_len, "trace_mini_indir");
+            w += indir_m_len + 1;
+          }
         }
 
       }

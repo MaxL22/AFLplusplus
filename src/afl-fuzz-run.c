@@ -567,6 +567,10 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
 
     memcpy(afl->first_trace, afl->fsrv.trace_bits, afl->fsrv.map_size);
     hnb = has_new_bits(afl, afl->virgin_bits);
+    // INDIR_CHANGE: indir check
+    if (afl->shm.indir_mode && has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
+      hnb = 2;
+    }
     if (unlikely(hnb > new_bits)) { new_bits = hnb; }
 
   }
@@ -619,6 +623,9 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
     if (unlikely(q->exec_cksum != cksum || (afl->shm.indir_mode && q->indir_cksum != indir_cksum))) {
 
       hnb = has_new_bits(afl, afl->virgin_bits);
+      if (afl->shm.indir_mode && has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
+        hnb = 2;
+      }
 
       if (unlikely(hnb > new_bits)) { new_bits = hnb; }
 

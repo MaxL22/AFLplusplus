@@ -1162,8 +1162,8 @@ void recalculate_all_scores(afl_state_t *afl) {
 
       // INDIR_CHANGE: again, as above
       if (afl->shm.indir_mode && afl->fsrv.indir_bits && afl->indir_top_rated_candidates) {
-        for (j = 0; j < afl->shm.indir_map_size; ++j) {
-          if (afl->fsrv.indir_bits[j]) {
+        for (j = 0; j < afl->shm.indir_map_size * 8; ++j) {
+          if (afl->fsrv.indir_bits[j >> 3] & (1 << (j & 7))) {
             u32 *candidate_ids = afl->indir_top_rated_candidates[j];
             u32  id = afl->queue_buf[i]->id;
 
@@ -1210,7 +1210,7 @@ void recalculate_all_scores(afl_state_t *afl) {
 
   // INDIR_CHANGE: as above, once again
   if (afl->shm.indir_mode && afl->indir_top_rated_candidates) {
-    for (i = 0; i < afl->shm.indir_map_size; ++i) {
+    for (i = 0; i < afl->shm.indir_map_size * 8; ++i) {
       u32 *candidate_ids = afl->indir_top_rated_candidates[i];
       if (candidate_ids) {
         u32 count = candidate_ids[0];
@@ -1318,6 +1318,12 @@ void update_bitmap_rescore(afl_state_t *afl, struct queue_entry *q, u32 index) {
 
     u32 len = (afl->fsrv.map_size >> 3);
     q->trace_mini = (u8 *)ck_alloc(len);
+
+    // INDIR_CHANGE: Run the target to get the correct trace
+    u8 *in_buf = queue_testcase_get(afl, q);
+    (void)write_to_testcase(afl, (void **)&in_buf, q->len, 1);
+    (void)fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
+
     minimize_bits(afl, q->trace_mini, afl->fsrv.trace_bits);
 
   }
@@ -1411,8 +1417,15 @@ void update_bitmap_indir_rescore(afl_state_t *afl, struct queue_entry *q, u32 in
 
   if (!q->trace_mini_indir) {
 
-    u32 len = ((afl->shm.indir_map_size + 7) >> 3);
+    // INDIR_CHANGE
+    u32 len = afl->shm.indir_map_size;
     q->trace_mini_indir = (u8 *)ck_alloc(len);
+    //Run the target to get the correct trace, 
+    // otherwise it uses the trace from the last item executed in recalculate_all_scores
+    u8 *in_buf = queue_testcase_get(afl, q);
+    (void)write_to_testcase(afl, (void **)&in_buf, q->len, 1);
+    (void)fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
+
     minimize_indir_bits(afl, q->trace_mini_indir, afl->fsrv.indir_bits);
 
   }
