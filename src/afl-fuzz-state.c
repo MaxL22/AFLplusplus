@@ -142,7 +142,7 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->fsrv.map_size = map_size;
   // afl_state_t is not available in forkserver.c
   afl->fsrv.afl_ptr = (void *)afl;
-  afl->fsrv.add_extra_func = (void (*)(void *, u8 *, u32)) & add_extra;
+  afl->fsrv.add_extra_func = (void (*)(void *, u8 *, u32))&add_extra;
   afl->fsrv.exec_tmout = EXEC_TIMEOUT;
   afl->fsrv.mem_limit = MEM_LIMIT;
   afl->fsrv.dev_urandom_fd = -1;
@@ -918,21 +918,7 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
 
 void afl_state_deinit(afl_state_t *afl) {
 
-  // INDIR_CHANGE
-  if (afl->shm.indir_mode) {
-    ck_free(afl->indir_virgin_bits);
-    ck_free(afl->indir_virgin_tmout);
-    ck_free(afl->indir_virgin_crash);
-  }
-  if (afl->indir_top_rated) { ck_free(afl->indir_top_rated); } // Deinit queue stuff
-  if (afl->indir_top_rated_candidates) {
-    for (u32 i = 0; i < afl->shm.indir_map_size * 8; i++) {
-      if (afl->indir_top_rated_candidates[i]) {
-        ck_free(afl->indir_top_rated_candidates[i]);
-      }
-    }
-    ck_free(afl->indir_top_rated_candidates);
-  }
+  // INDIR_CHANGE: indirect buffers are freed at the end of afl_state_deinit
 
   if (afl->in_place_resume) { ck_free(afl->in_dir); }
   if (afl->sync_id) { ck_free(afl->out_dir); }
@@ -976,6 +962,43 @@ void afl_state_deinit(afl_state_t *afl) {
   ck_free(afl->clean_trace_custom);
   ck_free(afl->first_trace);
   ck_free(afl->map_tmp_buf);
+  // INDIR_CHANGE: free indirect candidate lists and buffers
+  if (afl->indir_top_rated_candidates) {
+
+    for (u32 i = 0; i < afl->shm.indir_map_size * 8; i++) {
+
+      if (afl->indir_top_rated_candidates[i]) {
+
+        ck_free(afl->indir_top_rated_candidates[i]);
+        afl->indir_top_rated_candidates[i] = NULL;
+
+      }
+
+    }
+
+    ck_free(afl->indir_top_rated_candidates);
+    afl->indir_top_rated_candidates = NULL;
+
+  }
+
+  ck_free(afl->indir_virgin_bits);
+  afl->indir_virgin_bits = NULL;
+  ck_free(afl->indir_virgin_tmout);
+  afl->indir_virgin_tmout = NULL;
+  ck_free(afl->indir_virgin_crash);
+  afl->indir_virgin_crash = NULL;
+  ck_free(afl->indir_var_bytes);
+  afl->indir_var_bytes = NULL;
+  ck_free(afl->clean_trace_indir);
+  afl->clean_trace_indir = NULL;
+  ck_free(afl->baseline_trace_indir);
+  afl->baseline_trace_indir = NULL;
+  ck_free(afl->first_trace_indir);
+  afl->first_trace_indir = NULL;
+  ck_free(afl->indir_map_tmp_buf);
+  afl->indir_map_tmp_buf = NULL;
+  ck_free(afl->indir_top_rated);
+  afl->indir_top_rated = NULL;
 
   /* Free IJON max tracking state */
   if (afl->ijon_state) {

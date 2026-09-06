@@ -315,10 +315,8 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   }
 
   // INDIR_CHANGE: set indir_mode to 1
-  if (getenv("AFL_LLVM_INDIRECT")) {
-    fsrv->indir_mode = 1;
-  }
-  
+  if (getenv("AFL_LLVM_INDIRECT")) { fsrv->indir_mode = 1; }
+
   /* exec related stuff */
   fsrv->child_pid = -1;
   fsrv->map_size = get_map_size();
@@ -1021,6 +1019,13 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
       unsetenv(CMPLOG_SHM_ENV_VAR);  // we do not want that in non-cmplog fsrv
 
+    } else {
+
+      // INDIR_CHANGE: prevent cmplog child from inheriting indirect SHM
+      // environment
+      unsetenv(INDIR_SHM_ENV_VAR);
+      unsetenv(INDIR_MAP_SIZE_ENV_VAR);
+
     }
 
     /* Umpf. On OpenBSD, the default fd limit for root users is set to
@@ -1286,12 +1291,20 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
       // INDIR_CHANGE: Read indir_map_size
       if ((status & FS_NEW_OPT_INDIR_MAPSIZE)) {
+
         u32 tmp_indir_map_size;
         rlen = read(fsrv->fsrv_st_fd, &tmp_indir_map_size, 4);
-        if (rlen != 4) { FATAL("Short read from forkserver for indir map size"); }
+        if (rlen != 4) {
+
+          FATAL("Short read from forkserver for indir map size");
+
+        }
+
         fsrv->indir_map_size = tmp_indir_map_size;
         if (fsrv->indir_map_size % 64)
-          fsrv->indir_map_size = (((fsrv->indir_map_size + 63) >> 6) << 6); // align to 64 bit
+          fsrv->indir_map_size =
+              (((fsrv->indir_map_size + 63) >> 6) << 6);  // align to 64 bit
+
       }
 
       if (status & FS_NEW_OPT_SHDMEM_FUZZ) {
@@ -2212,17 +2225,17 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
     MEM_BARRIER();
 #endif
 
-    // INDIR_CHANGE
-    // This resets the shared memory
-    if (fsrv->indir_mode && fsrv->indir_bits) {
-      // INDIR_CHANGE: dynamic shm size
+    // INDIR_CHANGE: zero only active bytes of the indirect map
+    if (fsrv->indir_mode && fsrv->indir_bits && fsrv->indir_map_size > 0) {
+
       memset(fsrv->indir_bits, 0, fsrv->indir_map_size);
+
     }
+
     MEM_BARRIER();
+
   }
 
-
-  
   /* we have the fork server (or faux server) up and running
   First, tell it if the previous run timed out. */
 

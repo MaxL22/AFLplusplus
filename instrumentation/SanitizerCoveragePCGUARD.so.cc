@@ -141,11 +141,11 @@ class ModuleSanitizerCoverageAFL
                                      PostDomTreeCallback PDTCallback);
 
  private:
-  void            instrumentFunction(Function &F, DomTreeCallback DTCallback,
-                                     PostDomTreeCallback PDTCallback);
-  bool            InjectCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
+  void instrumentFunction(Function &F, DomTreeCallback DTCallback,
+                          PostDomTreeCallback PDTCallback);
+  bool InjectCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   // INDIR_CHANGE: function def
-  bool            InjectIndirCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
+  bool InjectIndirCoverage(Function &F, ArrayRef<BasicBlock *> AllBlocks);
   GlobalVariable *CreateFunctionLocalArrayInSection(size_t    NumElements,
                                                     Function &F, Type *Ty,
                                                     const char *Section);
@@ -159,7 +159,7 @@ class ModuleSanitizerCoverageAFL
                                                 Type *Ty);
 
   // Helper functions for cleaner code
-  bool   isInstructionInteresting(Instruction &IN);
+  bool isInstructionInteresting(Instruction &IN);
   // INDIR_CHANGE: helper function definition
   bool   isInstructionIndirInteresting(Instruction &IN);
   bool   isAflInterestingCall(Instruction &IN);
@@ -194,7 +194,7 @@ class ModuleSanitizerCoverageAFL
   LLVMContext      *C;
   const DataLayout *DL;
 
-  GlobalVariable                *FunctionGuardArray;  // for trace-pc-guard.
+  GlobalVariable *FunctionGuardArray;  // for trace-pc-guard.
   // INDIR_CHANGE: added FunctionIndirGuardArray
   GlobalVariable                *FunctionIndirGuardArray = nullptr;
   SmallVector<GlobalValue *, 20> GlobalsToAppendToUsed;
@@ -202,13 +202,14 @@ class ModuleSanitizerCoverageAFL
 
   SanitizerCoverageOptions Options;
 
-  // INDIR_CHANGE: added indir counter for number of indir instr
-  // added indir_enable to enable/disable indir instrumentation
+  // INDIR_CHANGE: default to false (opt-in via AFL_LLVM_INDIRECT)
   uint32_t indir = 0;
-  bool            indir_enable = true; // TODO: should probably be false by default
+  bool     indir_enable = false;
 
   uint32_t instr = 0, selects = 0, unhandled = 0, skippedbb = 0, dump_cc = 0;
   GlobalVariable *AFLMapPtr = NULL;
+  // INDIR_CHANGE: AFLIndirMapPtr
+  GlobalVariable *AFLIndirMapPtr = NULL;
   GlobalVariable *AFLCovMapSize = NULL;
   GlobalVariable *AFLIJONState = NULL;
   Value          *HoistedMapPtr = NULL;
@@ -399,8 +400,9 @@ void ModuleSanitizerCoverageAFL::setupEnvironmentVariables() {
   ijon_enabled = getenv("AFL_LLVM_IJON");
   if (getenv("AFL_LLVM_DENY_EXEC")) { deny_exec = true; }
 
-  //INDIR_CHANGE: parsing of env var
+  // INDIR_CHANGE: parsing of env var
   if (getenv("AFL_LLVM_INDIRECT")) { indir_enable = true; }
+
 }
 
 Value *ModuleSanitizerCoverageAFL::createGuardPointer(IRBuilder<> &IRB,
@@ -415,7 +417,7 @@ Value *ModuleSanitizerCoverageAFL::createGuardPointer(IRBuilder<> &IRB,
 
 // INDIR_CHANGE: added createIndirGuardPointer
 Value *ModuleSanitizerCoverageAFL::createIndirGuardPointer(IRBuilder<> &IRB,
-                                                      uint32_t     index) {
+                                                           uint32_t     index) {
 
   return IRB.CreateIntToPtr(
       IRB.CreateAdd(IRB.CreatePointerCast(FunctionIndirGuardArray, IntptrTy),
@@ -686,6 +688,14 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
   LLVMContext &Ctx = M.getContext();
   AFLMapPtr = new GlobalVariable(M, PtrTy, false, GlobalValue::ExternalLinkage,
                                  0, "__afl_area_ptr");
+  // INDIR_CHANGE: AFLIndirMapPtr
+  if (indir_enable) {
+
+    AFLIndirMapPtr = new GlobalVariable(
+        M, PtrTy, false, GlobalValue::ExternalLinkage, 0, "__afl_indir_ptr");
+
+  }
+
   AFLCovMapSize = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_cov_map_size");
 
@@ -767,7 +777,9 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
           instr, modeline, selects, unhandled, buf);
       // INDIR_CHANGE; new print for indir stuff
       if (indir_enable) {
+
         OKF("Instrumented %u indirect locations I guess", indir);
+
       }
 
       if (getenv("AFL_LLVM_IJON")) {
@@ -932,9 +944,9 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
   }
 
   InjectCoverage(F, BlocksToInstrument);
-  
-  //INDIR_CHANGE
-  if (indir_enable) {InjectIndirCoverage(F, BlocksToInstrument);}
+
+  // INDIR_CHANGE
+  if (indir_enable) { InjectIndirCoverage(F, BlocksToInstrument); }
 
   if (dump_cc) { calcCyclomaticComplexity(&F); }
 
@@ -986,52 +998,150 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 
 }
 
-//INDIR_CHANGE: InjectIndirCoverage definition for guard array
+// INDIR_CHANGE: Inlined branchless indirect jump coverage instrumentation
 bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
-  Function &F, ArrayRef<BasicBlock *> AllBlocks) {
+    Function &F, ArrayRef<BasicBlock *> AllBlocks) {
 
   if (AllBlocks.empty()) return false;
-  
-  uint32_t num_indir = 0;
-  for (auto &BB : F)
-    for (auto &IN : BB)
-      if (isInstructionIndirInteresting(IN))
-        num_indir++;
 
-  if (num_indir == 0) return false;
+  // 1. Two-pass collection: prevent iterator invalidation
+  std::vector<Instruction *> IndirInstructions;
+  for (auto &BB : F) {
 
+    for (auto &IN : BB) {
+
+      if (isInstructionIndirInteresting(IN)) {
+
+        IndirInstructions.push_back(&IN);
+
+      }
+
+    }
+
+  }
+
+  if (IndirInstructions.empty()) return false;
+
+  uint32_t num_indir = IndirInstructions.size();
   FunctionIndirGuardArray = CreateFunctionLocalArrayInSection(
       num_indir, F, Int32Ty, SanCovIndirGuardsSectionName);
 
-  FunctionCallee TraceIndirCb = F.getParent()->getOrInsertFunction(
-      "__afl_trace_indir",
-      Type::getVoidTy(*C),
-      Int32PtrTy,    // Arg 1: pointer to guard slot
-      IntptrTy       // Arg 2: target_addr
-  );
+  IntegerType *SlotTy = IntegerType::getIntNTy(*C, INDIR_SLOT_SIZE);
+  ConstantInt *OneSlot = ConstantInt::get(SlotTy, 1);
+  ConstantInt *ZeroSlot = ConstantInt::get(SlotTy, 0);
+  ConstantInt *KnuthConst64 =
+      ConstantInt::get(cast<IntegerType>(Int64Ty), 0x9E3779B97F4A7C15ULL);
+  ConstantInt *ShiftAmt64 =
+      ConstantInt::get(cast<IntegerType>(Int64Ty), 64 - INDIR_BIT_SHIFT);
 
   uint32_t local_idx = 0;
 
-  for (auto &BB : F) {
-    for (auto &IN : BB) {
-      if (!isInstructionIndirInteresting(IN)) continue;
+  for (auto *IN : IndirInstructions) {
 
-      IRBuilder<> IRB(&IN);
-      Value *GuardPtr = createIndirGuardPointer(IRB, local_idx++);
-      Value *TargetPtr = nullptr;
+    Value *TargetPtr = nullptr;
+    if (auto *ibr = dyn_cast<IndirectBrInst>(IN)) {
 
-      if (auto *ibr = dyn_cast<IndirectBrInst>(&IN))
-        TargetPtr = ibr->getAddress();
-      else if (auto *call = dyn_cast<CallBase>(&IN))
-        TargetPtr = call->getCalledOperand();
+      TargetPtr = ibr->getAddress();
 
-      Value *TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
-      IRB.CreateCall(TraceIndirCb, {GuardPtr, TargetAddrInt});
+    } else if (auto *cb = dyn_cast<CallBase>(IN)) {
 
-      indir++;
+      TargetPtr = cb->getCalledOperand();
+
     }
+
+    if (!TargetPtr) continue;
+
+    // 2. Determine safe insertion point
+    Instruction *InsertBefore = nullptr;
+    auto        *callInst = dyn_cast<CallInst>(IN);
+    auto        *invokeInst = dyn_cast<InvokeInst>(IN);
+
+    if (callInst && !callInst->doesNotReturn() && callInst->getNextNode()) {
+
+      // Returning call: insert post-call to eliminate phantom coverage
+      InsertBefore = callInst->getNextNode();
+
+    } else if (invokeInst) {
+
+      BasicBlock *NormalDest = invokeInst->getNormalDest();
+      if (NormalDest->getSinglePredecessor() == invokeInst->getParent()) {
+
+        InsertBefore = &*NormalDest->getFirstInsertionPt();
+
+      } else {
+
+        // Multi-predecessor critical edge: insert pre-invoke to avoid verifier
+        // dominance failure
+        InsertBefore = invokeInst;
+
+      }
+
+    } else {
+
+      // Terminators (IndirectBr, CallBr) and noreturn calls: insert
+      // pre-instruction
+      InsertBefore = IN;
+
+    }
+
+    IRBuilder<> IRB(InsertBefore);
+
+    // 3. Compute relative ASLR-invariant displacement
+    Value *TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
+    Value *FuncAddr = IRB.CreatePtrToInt(&F, IntptrTy);
+    Value *Displacement = IRB.CreateSub(TargetAddrInt, FuncAddr);
+
+    // Shift: preserve basic block labels for IndirectBr
+    unsigned Shift = isa<IndirectBrInst>(IN) ? 0 : 4;
+    Value   *Shifted =
+        (Shift > 0)
+              ? IRB.CreateLShr(Displacement, ConstantInt::get(IntptrTy, Shift))
+              : Displacement;
+
+    // Zero-extend to 64-bit for Knuth multiplication (safe on 32-bit and 64-bit
+    // targets)
+    Value *Shifted64 = IRB.CreateZExtOrTrunc(Shifted, Int64Ty);
+    Value *Hashed64 = IRB.CreateMul(Shifted64, KnuthConst64);
+    Value *BitIdx64 = IRB.CreateLShr(Hashed64, ShiftAmt64);
+    Value *BitIdxSlot = IRB.CreateZExtOrTrunc(BitIdx64, SlotTy);
+    Value *RawBitMask = IRB.CreateShl(OneSlot, BitIdxSlot);
+
+    // Branchless phantom suppression: if pre-instruction and TargetPtr is NULL,
+    // mask to 0
+    Value *BitMask = RawBitMask;
+    if (InsertBefore == IN) {
+
+      Value *IsNonZero =
+          IRB.CreateICmpNE(TargetAddrInt, ConstantInt::get(IntptrTy, 0));
+      BitMask = IRB.CreateSelect(IsNonZero, RawBitMask, ZeroSlot);
+
+    }
+
+    // 4. Load guard and shared memory base pointer
+    Value    *GuardPtr = createIndirGuardPointer(IRB, local_idx++);
+    LoadInst *GuardVal = IRB.CreateLoad(Int32Ty, GuardPtr);
+    setNoSanitizeMetadata(GuardVal);
+
+    LoadInst *BasePtr = IRB.CreateLoad(PtrTy, AFLIndirMapPtr);
+    setNoSanitizeMetadata(BasePtr);
+    BasePtr->setMetadata(LLVMContext::MD_invariant_load, MDNode::get(*C, {}));
+
+    // 5. GEP into SlotTy: Slot 0 serves as branchless dummy sink when GuardVal
+    // == 0
+    Value *SlotPtr = IRB.CreateGEP(SlotTy, BasePtr, GuardVal);
+
+    // 6. Thread-safe atomic bitwise OR
+    auto *AtomicOp = IRB.CreateAtomicRMW(
+        llvm::AtomicRMWInst::BinOp::Or, SlotPtr, BitMask,
+        llvm::MaybeAlign(INDIR_SLOT_SIZE / 8), llvm::AtomicOrdering::Monotonic);
+    setNoInstrumentMetadata(AtomicOp);
+
+    indir++;
+
   }
+
   return true;
+
 }
 
 bool ModuleSanitizerCoverageAFL::InjectCoverage(
@@ -1195,7 +1305,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   uint32_t xtra = 0;
   if (skip_blocks < first + cnt_cov + cnt_sel_inc + cnt_special) {
 
-    xtra = first + cnt_cov + cnt_sel_inc + cnt_special + - skip_blocks;
+    xtra = first + cnt_cov + cnt_sel_inc + cnt_special + -skip_blocks;
 
   }
 
@@ -1258,7 +1368,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       bool instrumentInst = isInstructionInteresting(IN);
 
       if (instrumentInst) {
-       
+
         Value      *result = nullptr;
         uint32_t    vector_cnt = 0;
         SelectInst *selectInst;
@@ -1461,6 +1571,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       }
 
     }
+
   }
 
   skippedbb += skipped;

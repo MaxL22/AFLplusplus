@@ -996,17 +996,43 @@ void read_bitmap(u8 *fname, u8 *map, size_t len) {
 
 }
 
-// INDIR_CHANGE: this is new, I guess
+// INDIR_CHANGE: robust offset-aware bitmap reading with EOF protection
 void read_bitmap_offset(u8 *fname, u8 *map, size_t len, off_t offset) {
 
   s32 fd = open(fname, O_RDONLY);
-
   if (fd < 0) { PFATAL("Unable to open '%s'", fname); }
 
-  if (lseek(fd, offset, SEEK_SET) == -1) { PFATAL("Unable to lseek in '%s'", fname); }
+  struct stat st;
+  if (fstat(fd, &st) < 0) { PFATAL("Unable to stat '%s'", fname); }
 
-  ck_read(fd, map, len, fname);
+  if (st.st_size <= offset) {
 
+    // File contains only primary edge bitmap; initialize indirect map to 0xFF
+    WARNF(
+        "Bitmap '%s' lacks secondary indirect map segment; initializing to "
+        "0xFF",
+        fname);
+    memset(map, 255, len);
+    close(fd);
+    return;
+
+  }
+
+  if (lseek(fd, offset, SEEK_SET) == -1) {
+
+    PFATAL("Unable to lseek in '%s'", fname);
+
+  }
+
+  size_t to_read = len;
+  if ((off_t)(offset + len) > st.st_size) {
+
+    to_read = st.st_size - offset;
+    memset(map + to_read, 255, len - to_read);
+
+  }
+
+  ck_read(fd, map, to_read, fname);
   close(fd);
 
 }

@@ -100,8 +100,10 @@ void write_bitmap(afl_state_t *afl) {
   // Write the bitmap to resume
   // It is currently NOT fully implemented
   if (afl->shm.indir_mode) {
+
     // fsrv and not shm cus we want to write only the actual size
     ck_write(fd, afl->indir_virgin_bits, afl->fsrv.indir_map_size, fname);
+
   }
 
   close(fd);
@@ -145,26 +147,41 @@ u32 count_bits(afl_state_t *afl, u8 *mem) {
 
 }
 
-// INDIR_CHANGE
+// INDIR_CHANGE: guard against inactive indirect mode or NULL virgin bits
 u32 count_indir_bits(afl_state_t *afl) {
-  u32 *ptr = (u32 *)afl->indir_virgin_bits;
-  u32 i = (afl->fsrv.indir_map_size >> 2);
-  u32 ret = 0;
 
-  // Counting zeros: we have the virgin map, bits are set to zero as they are discovered
-  while (i--) {
-    u32 v = *(ptr++);
-    ret += __builtin_popcount(~v); 
+  if (!afl->shm.indir_mode || !afl->indir_virgin_bits ||
+      !afl->fsrv.indir_map_size) {
+
+    return 0;
+
   }
+
+  u32 *ptr = (u32 *)afl->indir_virgin_bits;
+  u32  i = (afl->fsrv.indir_map_size >> 2);
+  u32  ret = 0;
+
+  // Counting zeros: we have the virgin map, bits are set to zero as they are
+  // discovered
+  while (i--) {
+
+    u32 v = *(ptr++);
+    ret += __builtin_popcount(~v);
+
+  }
+
   return ret;
+
 }
 
-// INDIR_CHANGE
+// INDIR_CHANGE: guard against inactive indirect mode or NULL mem pointer
 /* Count the number of bits set in the indir bitmap. Called fairly sporadically,
    mostly to update the status screen or calibrate and examine confirmed
    new paths. */
 
 u32 count_indir_bits_run(afl_state_t *afl, u8 *mem) {
+
+  if (!afl->shm.indir_mode || !mem || !afl->fsrv.indir_map_size) { return 0; }
 
   u32 *ptr = (u32 *)mem;
   u32  i = (afl->fsrv.indir_map_size >> 2);
@@ -295,43 +312,120 @@ inline u8 has_new_bits(afl_state_t *afl, u8 *virgin_map) {
 
 }
 
-// INDIR_CHANGE
-// Returns 1 if new coverage is found, 0 otherwise
-// This is kind of a copy of the one above
+// INDIR_CHANGE: dedicated SIMD raw bitwise novelty check without
+// classify_word()
+#if defined(__AVX2__)
+static inline u32 skim_indir(const u64 *virgin, const u64 *current,
+                             const u64 *current_end) {
+
+  for (; current + 4 <= current_end; virgin += 4, current += 4) {
+
+    __m256i cur_val = _mm256_loadu_si256((const __m256i *)current);
+    if (_mm256_testz_si256(cur_val, cur_val)) continue;  // All bytes zero
+
+    __m256i vir_val = _mm256_loadu_si256((const __m256i *)virgin);
+    __m256i and_val = _mm256_and_si256(cur_val, vir_val);
+    if (!_mm256_testz_si256(and_val, and_val)) return 1;  // Novel bits found!
+
+  }
+
+  while (current < current_end) {
+
+    if (unlikely(*current & *virgin)) return 1;
+    current++;
+    virgin++;
+
+  }
+
+  return 0;
+
+}
+
+#endif
+
+// INDIR_CHANGE: non-mutating novelty check for calibration
+inline u8 check_indir_new_bits_map(afl_state_t *afl,
+                                   const u8    *indir_virgin_map) {
+
+#if defined(__AVX2__) && defined(WORD_SIZE_64)
+  const u64 *end =
+      (const u64 *)(afl->fsrv.indir_bits + afl->fsrv.indir_map_size);
+  return skim_indir((const u64 *)indir_virgin_map,
+                    (const u64 *)afl->fsrv.indir_bits, end);
+#else
+  #ifdef WORD_SIZE_64
+  u64 *current = (u64 *)afl->fsrv.indir_bits;
+  u64 *virgin = (u64 *)indir_virgin_map;
+  u32  i = (afl->fsrv.indir_map_size >> 3);
+  #else
+  u32 *current = (u32 *)afl->fsrv.indir_bits;
+  u32 *virgin = (u32 *)indir_virgin_map;
+  u32  i = (afl->fsrv.indir_map_size >> 2);
+  #endif
+  while (i--) {
+
+    if (unlikely(*current & *virgin)) return 1;
+    current++;
+    virgin++;
+
+  }
+
+  return 0;
+#endif
+
+}
+
+// INDIR_CHANGE: returns 1 if new indirect coverage is found, 0 otherwise
 inline u8 has_indir_new_bits_map(afl_state_t *afl, u8 *indir_virgin_map) {
 
-  if (unlikely(afl->fsrv.indir_map_size % 8 != 0)) { FATAL("indir_map_size must be a multiple of 8"); }
+  if (unlikely(afl->fsrv.indir_map_size % 8 != 0)) {
+
+    FATAL("indir_map_size must be a multiple of 8");
+
+  }
+
+#if defined(__AVX2__) && defined(WORD_SIZE_64)
+  const u64 *end =
+      (const u64 *)(afl->fsrv.indir_bits + afl->fsrv.indir_map_size);
+  if (!skim_indir((const u64 *)indir_virgin_map,
+                  (const u64 *)afl->fsrv.indir_bits, end))
+    return 0;
+#endif
 
 #ifdef WORD_SIZE_64
   u64 *current = (u64 *)afl->fsrv.indir_bits;
-  u64 *virgin  = (u64 *)indir_virgin_map;
-  u32 i = (afl->fsrv.indir_map_size >> 3); // divide by 8
+  u64 *virgin = (u64 *)indir_virgin_map;
+  u32  i = (afl->fsrv.indir_map_size >> 3);  // divide by 8
 #else
   u32 *current = (u32 *)afl->fsrv.indir_bits;
-  u32 *virgin  = (u32 *)indir_virgin_map;
-  u32 i = (afl->fsrv.indir_map_size >> 2); // divide by 4
+  u32 *virgin = (u32 *)indir_virgin_map;
+  u32  i = (afl->fsrv.indir_map_size >> 2);  // divide by 4
 #endif
 
   u8 ret = 0;
 
   while (i--) {
+
     if (unlikely(*current)) {
+
       if (unlikely(*current & *virgin)) {
-        
+
         ret = 1;
         *virgin &= ~(*current);
+
       }
+
     }
-    
+
     current++;
     virgin++;
+
   }
 
-  if (unlikely(ret)) {
-    afl->bitmap_changed = 1;
-  }
+  if (unlikely(ret)) { afl->bitmap_changed = 1; }
 
   return ret;
+
 }
 
 /* A combination of classify_counts and has_new_bits. If 0 is returned, then the
@@ -703,10 +797,14 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
       // INDIR_CHANGE: kinda the same thing as the `if_necessary` above
       // (could be a spearate function)
       if (afl->shm.indir_mode && !indir_bits_counted) {
+
         indir_bits_counted = true;
         if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
+
           indir_new_bits = 1;
+
         }
+
       }
 
       if (unlikely(new_bits || indir_new_bits)) { feed_san = 1; }
@@ -780,22 +878,29 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
        future fuzzing, etc. */
     calculate_new_bits_if_necessary(afl, &new_bits, &bits_counted, &classified);
 
-    // INDIR_CHANGE: check the coverage
+    // INDIR_CHANGE: treat indirect novelty as secondary hit-count feedback
+    // (new_bits = 1)
     if (afl->shm.indir_mode) {
+
       if (!indir_bits_counted) {
+
         indir_bits_counted = true;
         if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
+
           indir_new_bits = 1;
+
         }
+
       }
-      if (indir_new_bits) {
-        new_bits = 2;
-      }
+
+      if (indir_new_bits && new_bits == 0) { new_bits = 1; }
+
     }
 
     // INDIR_CHANGE: kinda the same thing as the `if_necessary` above
     // (could be a spearate function)
     if (likely(!new_bits)) {
+
       if (san_fault == FSRV_RUN_OK) {
 
         if (unlikely(afl->crash_mode)) { ++afl->total_crashes; }
@@ -820,17 +925,23 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
     calculate_cksum_if_necessary(afl, &cksum, &cksumed, &classified);
     calculate_new_bits_if_necessary(afl, &new_bits, &bits_counted, &classified);
 
-    // INDIR_CALCULATIONS
+    // INDIR_CHANGE: treat indirect novelty as secondary hit-count feedback
+    // (new_bits = 1)
     if (afl->shm.indir_mode) {
+
       if (!indir_bits_counted) {
+
         indir_bits_counted = true;
         if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
+
           indir_new_bits = 1;
+
         }
+
       }
-      if (indir_new_bits) {
-        new_bits = 2;
-      }
+
+      if (indir_new_bits && new_bits == 0) { new_bits = 1; }
+
     }
 
 #ifndef SIMPLE_FILES
@@ -872,8 +983,11 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
     add_to_queue(afl, queue_fn, len, 0);
 
+    // INDIR_CHANGE: only major CFG edge discovery (new_bits == 2) kicks out of
+    // exploitation mode
     if (unlikely(afl->fuzz_mode) &&
-        likely(afl->switch_fuzz_mode && !afl->non_instrumented_mode)) {
+        likely(afl->switch_fuzz_mode && !afl->non_instrumented_mode) &&
+        new_bits == 2) {
 
       if (afl->afl_env.afl_no_ui) {
 
@@ -968,11 +1082,9 @@ may_save_fault:
       if (likely(!afl->non_instrumented_mode)) {
 
         simplify_trace(afl, afl->fsrv.trace_bits);
-        // INDIR_CHANGE: it's new even if it has new indir bits
+        // INDIR_CHANGE: decouple unique timeout deduplication from indirect
+        // novelty
         u8 has_new = has_new_bits(afl, afl->virgin_tmout);
-        if (afl->shm.indir_mode) {
-          has_new |= has_indir_new_bits_map(afl, afl->indir_virgin_tmout);
-        }
         if (!has_new) { return keeping; }
 
       }
@@ -1107,11 +1219,9 @@ may_save_fault:
       if (likely(!afl->non_instrumented_mode)) {
 
         simplify_trace(afl, afl->fsrv.trace_bits);
-        // INDIR_CHANGE: it's new even for new indir bits
+        // INDIR_CHANGE: decouple unique crash deduplication from indirect
+        // novelty
         u8 has_new = has_new_bits(afl, afl->virgin_crash);
-        if (afl->shm.indir_mode) {
-          has_new |= has_indir_new_bits_map(afl, afl->indir_virgin_crash);
-        }
         if (!has_new) { return keeping; }
 
       }

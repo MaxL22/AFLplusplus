@@ -128,9 +128,10 @@ extern u64 time_spent_working;
 
 static void at_exit() {
 
-  s32   i, pid1 = 0, pid2 = 0, pgrp = -1;
+  s32 i, pid1 = 0, pid2 = 0, pgrp = -1;
   // INDIR_CHANGE: added the env var
-  char *list[5] = {SHM_ENV_VAR, SHM_FUZZ_ENV_VAR, CMPLOG_SHM_ENV_VAR, INDIR_SHM_ENV_VAR, NULL};
+  char *list[5] = {SHM_ENV_VAR, SHM_FUZZ_ENV_VAR, CMPLOG_SHM_ENV_VAR,
+                   INDIR_SHM_ENV_VAR, NULL};
   char *ptr;
 
   ptr = getenv("__AFL_TARGET_PID2");
@@ -2678,51 +2679,81 @@ int main(int argc, char **argv_orig, char **envp) {
 
   afl->argv = use_argv;
 
-  // INDIR_CHANGE: env var
+  // INDIR_CHANGE: default to 0; enable strictly on environment variable
   if (getenv("AFL_LLVM_INDIRECT")) {
+
     afl->shm.indir_mode = 1;
     OKF("Indirect jumps tracking enabled");
+
   } else {
-    // TODO: change to 0
-    // afl->shm.indir_mode = 0;
-    afl->shm.indir_mode = 1;
+
+    afl->shm.indir_mode = 0;
+
   }
+
   // INDIR_CHANGE: Setup dummy size and env var
   if (afl->shm.indir_mode) {
+
     if (getenv(INDIR_MAP_SIZE_ENV_VAR)) {
+
       afl->shm.indir_map_size = atoi(getenv(INDIR_MAP_SIZE_ENV_VAR));
       // INDIR_CHANGE
-      // align to 64 bytes so bitmap iteration functions (which process data in u32/u64 chunks)
-      // don't skip trailing bytes
+      // align to 64 bytes so bitmap iteration functions (which process data in
+      // u32/u64 chunks) don't skip trailing bytes
       if (afl->shm.indir_map_size % 64) {
+
         afl->shm.indir_map_size = (((afl->shm.indir_map_size + 63) >> 6) << 6);
+
       }
+
     } else {
+
       afl->shm.indir_map_size = DEFAULT_INDIR_SHMEM_SIZE;
+
     }
+
     char buf[32];
     snprintf(buf, sizeof(buf), "%zu", afl->shm.indir_map_size);
-    setenv(INDIR_MAP_SIZE_ENV_VAR, buf, 1); // It's just putting it as a string
+    setenv(INDIR_MAP_SIZE_ENV_VAR, buf, 1);  // It's just putting it as a string
+
   }
 
   afl->fsrv.trace_bits =
       afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode,
                    afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
-    
-  // INDIR_CHANGE: Dynamic allocation
+
+  // INDIR_CHANGE: Dynamic allocation of indirect fuzzer buffers
   if (afl->shm.indir_mode) {
-    afl->indir_virgin_bits = ck_alloc(afl->shm.indir_map_size);
+
+    afl->indir_virgin_bits = (u8 *)ck_alloc(afl->shm.indir_map_size);
     memset(afl->indir_virgin_bits, 255, afl->shm.indir_map_size);
-    afl->indir_virgin_tmout = ck_alloc(afl->shm.indir_map_size);
+    // Ensure slot 0 is permanently isolated as an ignored dummy sink
+    memset(afl->indir_virgin_bits, 0, sizeof(indir_slot_t));
+
+    afl->indir_virgin_tmout = (u8 *)ck_alloc(afl->shm.indir_map_size);
     memset(afl->indir_virgin_tmout, 255, afl->shm.indir_map_size);
-    afl->indir_virgin_crash = ck_alloc(afl->shm.indir_map_size);
+
+    afl->indir_virgin_crash = (u8 *)ck_alloc(afl->shm.indir_map_size);
     memset(afl->indir_virgin_crash, 255, afl->shm.indir_map_size);
-    afl->indir_top_rated = ck_alloc(afl->shm.indir_map_size * 8 * sizeof(struct queue_entry *));
-    afl->indir_top_rated_candidates = ck_alloc(afl->shm.indir_map_size * 8 * sizeof(u32 *));
+
+    afl->indir_var_bytes = (u8 *)ck_alloc(afl->shm.indir_map_size);
+    afl->clean_trace_indir = (u8 *)ck_alloc(afl->shm.indir_map_size);
+    afl->baseline_trace_indir = (u8 *)ck_alloc(afl->shm.indir_map_size);
+    afl->first_trace_indir = (u8 *)ck_alloc(afl->shm.indir_map_size);
+    afl->indir_map_tmp_buf = (u8 *)ck_alloc(afl->shm.indir_map_size);
+
+    size_t top_rated_sz =
+        afl->shm.indir_map_size * 8 * sizeof(struct queue_entry *);
+    afl->indir_top_rated = (struct queue_entry **)ck_alloc(top_rated_sz);
+
+    size_t top_candidates_sz = afl->shm.indir_map_size * 8 * sizeof(u32 *);
+    afl->indir_top_rated_candidates = (u32 **)ck_alloc(top_candidates_sz);
+
   }
+
   // link indir_bits and initialized map
   afl->fsrv.indir_bits = afl->shm.indir_map;
-  
+
   #ifdef __AFL_CODE_COVERAGE
   // Initialize pcmap and modmap before any forkserver starts
   if (getenv("AFL_DUMP_PC_MAP")) {
@@ -2753,64 +2784,105 @@ int main(int argc, char **argv_orig, char **envp) {
     // INDIR_CHANGE: Dynamic shm resize for indir_map_size
     u32 new_indir_map_size = afl->shm.indir_mode ? afl->fsrv.indir_map_size : 0;
     if (new_indir_map_size > 0) {
+
       char vbuf_indir[16];
       snprintf(vbuf_indir, sizeof(vbuf_indir), "%u", new_indir_map_size);
       setenv(INDIR_MAP_SIZE_ENV_VAR, vbuf_indir, 1);
-    }
-    bool needs_resize = (map_size < new_map_size);
-    bool indir_needs_resize = (new_indir_map_size > 0 && afl->shm.indir_map_size < new_indir_map_size);
 
-    // only reinitialize if the map needs to be larger than what we have.
-    // It has been changed to accomodate the second map
+    }
+
+    bool needs_resize = (map_size < new_map_size);
+    bool indir_needs_resize = (new_indir_map_size > 0 &&
+                               afl->shm.indir_map_size != new_indir_map_size);
+
+    // only reinitialize if the map needs to be changed.
+    // It has been changed to accommodate the second map
     if (needs_resize || indir_needs_resize) {
 
-      OKF("Re-initializing maps to %u bytes (indir: %u bytes)", new_map_size, new_indir_map_size);
-      if (needs_resize) {
-          afl_resize_map_buffers(afl, map_size, new_map_size);
-      }
+      OKF("Re-initializing maps to %u bytes (indir: %u bytes)", new_map_size,
+          new_indir_map_size);
+      if (needs_resize) { afl_resize_map_buffers(afl, map_size, new_map_size); }
 
       afl_fsrv_kill(&afl->fsrv);
       afl_shm_deinit(&afl->shm);
-      if (needs_resize) {
-          afl->fsrv.map_size = new_map_size;
-      }
-      //INDIR_CHANGE: we're de-inizializing all shms, might as well resize them both
-      if (needs_resize && !indir_needs_resize && new_indir_map_size > 0) {
-        afl->shm.indir_map_size = new_indir_map_size;
-      }
+      if (needs_resize) { afl->fsrv.map_size = new_map_size; }
+
       if (indir_needs_resize) {
-          // INDIR_CHANGE: use ck_realloc to preserve existing coverage data
-          // instead of ck_free + ck_alloc 
-          u32 old_indir_size = afl->shm.indir_map_size;
-          afl->shm.indir_map_size = new_indir_map_size;
-          afl->indir_virgin_bits = ck_realloc(afl->indir_virgin_bits, new_indir_map_size);
-          afl->indir_virgin_tmout = ck_realloc(afl->indir_virgin_tmout, new_indir_map_size);
-          afl->indir_virgin_crash = ck_realloc(afl->indir_virgin_crash, new_indir_map_size);
-          afl->indir_top_rated = ck_realloc(afl->indir_top_rated, new_indir_map_size * 8 * sizeof(struct queue_entry *));
-          afl->indir_top_rated_candidates = ck_realloc(afl->indir_top_rated_candidates, new_indir_map_size * 8 * sizeof(u32 *));
-          if (new_indir_map_size > old_indir_size) {
-            memset(afl->indir_virgin_bits + old_indir_size, 255, new_indir_map_size - old_indir_size);
-            memset(afl->indir_virgin_tmout + old_indir_size, 255, new_indir_map_size - old_indir_size);
-            memset(afl->indir_virgin_crash + old_indir_size, 255, new_indir_map_size - old_indir_size);
-            memset(afl->indir_top_rated + old_indir_size * 8, 0, (new_indir_map_size - old_indir_size) * 8 * sizeof(struct queue_entry *));
-            memset(afl->indir_top_rated_candidates + old_indir_size * 8, 0, (new_indir_map_size - old_indir_size) * 8 * sizeof(u32 *));
-            
-            // INDIR_CHANGE: Resize trace_mini_indir for all queued items to prevent out-of-bounds in cull_queue
-            for (u32 i = 0; i < afl->queued_items; i++) {
-              struct queue_entry *q = afl->queue_buf[i];
-              if (q && q->trace_mini_indir) {
-                q->trace_mini_indir = ck_realloc(q->trace_mini_indir, new_indir_map_size);
-                memset(q->trace_mini_indir + old_indir_size, 0, new_indir_map_size - old_indir_size);
-              }
+
+        // INDIR_CHANGE: dynamically reallocate all 9 indirect buffers on size
+        // negotiation
+        u32 old_indir_size = afl->shm.indir_map_size;
+        afl->indir_virgin_bits =
+            (u8 *)ck_realloc(afl->indir_virgin_bits, new_indir_map_size);
+        afl->indir_virgin_tmout =
+            (u8 *)ck_realloc(afl->indir_virgin_tmout, new_indir_map_size);
+        afl->indir_virgin_crash =
+            (u8 *)ck_realloc(afl->indir_virgin_crash, new_indir_map_size);
+        afl->indir_var_bytes =
+            (u8 *)ck_realloc(afl->indir_var_bytes, new_indir_map_size);
+        afl->clean_trace_indir =
+            (u8 *)ck_realloc(afl->clean_trace_indir, new_indir_map_size);
+        afl->baseline_trace_indir =
+            (u8 *)ck_realloc(afl->baseline_trace_indir, new_indir_map_size);
+        afl->first_trace_indir =
+            (u8 *)ck_realloc(afl->first_trace_indir, new_indir_map_size);
+        afl->indir_map_tmp_buf =
+            (u8 *)ck_realloc(afl->indir_map_tmp_buf, new_indir_map_size);
+
+        size_t top_rated_bytes =
+            new_indir_map_size * 8 * sizeof(struct queue_entry *);
+        afl->indir_top_rated = (struct queue_entry **)ck_realloc(
+            afl->indir_top_rated, top_rated_bytes);
+
+        size_t top_candidates_bytes = new_indir_map_size * 8 * sizeof(u32 *);
+        afl->indir_top_rated_candidates = (u32 **)ck_realloc(
+            afl->indir_top_rated_candidates, top_candidates_bytes);
+
+        if (new_indir_map_size > old_indir_size) {
+
+          size_t diff = new_indir_map_size - old_indir_size;
+          memset(afl->indir_virgin_bits + old_indir_size, 255, diff);
+          memset(afl->indir_virgin_tmout + old_indir_size, 255, diff);
+          memset(afl->indir_virgin_crash + old_indir_size, 255, diff);
+          memset(afl->indir_var_bytes + old_indir_size, 0, diff);
+          memset(afl->clean_trace_indir + old_indir_size, 0, diff);
+          memset(afl->baseline_trace_indir + old_indir_size, 0, diff);
+          memset(afl->first_trace_indir + old_indir_size, 0, diff);
+          memset(afl->indir_map_tmp_buf + old_indir_size, 0, diff);
+          memset(afl->indir_top_rated + old_indir_size * 8, 0,
+                 diff * 8 * sizeof(struct queue_entry *));
+          memset(afl->indir_top_rated_candidates + old_indir_size * 8, 0,
+                 diff * 8 * sizeof(u32 *));
+
+          // INDIR_CHANGE: Resize trace_mini_indir for all queued items to
+          // prevent out-of-bounds in cull_queue
+          for (u32 i = 0; i < afl->queued_items; i++) {
+
+            struct queue_entry *q = afl->queue_buf[i];
+            if (q && q->trace_mini_indir) {
+
+              q->trace_mini_indir =
+                  (u8 *)ck_realloc(q->trace_mini_indir, new_indir_map_size);
+              memset(q->trace_mini_indir + old_indir_size, 0, diff);
+
             }
+
           }
+
+        }
+
+        // Ensure slot 0 is permanently isolated as an ignored dummy sink
+        memset(afl->indir_virgin_bits, 0, sizeof(indir_slot_t));
+        afl->shm.indir_map_size = new_indir_map_size;
+        afl->fsrv.indir_map_size = new_indir_map_size;
+
       }
 
-      afl->fsrv.trace_bits =
-          afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode,
-                       afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
+      afl->fsrv.trace_bits = afl_shm_init(
+          &afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode, afl->perm,
+          afl->chown_needed ? afl->fsrv.gid : -1);
       setenv("AFL_NO_AUTODICT", "1", 1);  // loaded already
-      //INDIR_CHANGE
+      // INDIR_CHANGE
       afl->fsrv.indir_bits = afl->shm.indir_map;
 
   #ifdef __AFL_CODE_COVERAGE
@@ -2820,9 +2892,8 @@ int main(int argc, char **argv_orig, char **envp) {
       afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
                      afl->afl_env.afl_debug_child);
 
-      if (needs_resize) {
-          map_size = new_map_size;
-      }
+      if (needs_resize) { map_size = new_map_size; }
+
     }
 
   }
@@ -3035,9 +3106,10 @@ int main(int argc, char **argv_orig, char **envp) {
           afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode,
                        afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
       afl->cmplog_fsrv.trace_bits = afl->fsrv.trace_bits;
-      // INDIR_CHANGE: sync up different sizes
-      afl->fsrv.indir_bits = afl->shm.indir_map;
-      afl->cmplog_fsrv.indir_bits = afl->fsrv.indir_bits; // idk if cmplog actually works (I don't think so)
+      // INDIR_CHANGE: CmpLog binaries do not track indirect jumps; prevent
+      // memory contamination
+      afl->cmplog_fsrv.indir_mode = 0;
+      afl->cmplog_fsrv.indir_bits = NULL;
 
   #ifdef __AFL_CODE_COVERAGE
       if (getenv("AFL_DUMP_PC_MAP")) { afl_pcmap_resize(afl, new_map_size); }
@@ -3178,19 +3250,27 @@ int main(int argc, char **argv_orig, char **envp) {
 
       // INDIR_CHANGE: read trace_mini_indir
       if (afl->shm.indir_mode) {
+
         u8 indir_res[1] = {0};
         ZLIBREAD(fr_fd, indir_res, 1, "check indir map");
         if (indir_res[0]) {
+
           u32 indir_m_len = afl->shm.indir_map_size;
           q->trace_mini_indir = ck_alloc(indir_m_len);
           ZLIBREAD(fr_fd, q->trace_mini_indir, indir_m_len, "trace_mini_indir");
           r += indir_m_len + 1;
+
         } else {
+
           r += 1;
+
         }
+
       }
 
+      // INDIR_CHANGE: accumulate indirect bitmap size on queue import/resume
       afl->total_bitmap_size += q->bitmap_size;
+      afl->total_indir_bitmap_size += q->indir_bitmap_size;
       ++afl->total_bitmap_entries;
       update_bitmap_score(afl, q, false);
 
@@ -3349,7 +3429,10 @@ int main(int argc, char **argv_orig, char **envp) {
       read_bitmap(afl->in_bitmap, afl->virgin_bits, afl->fsrv.map_size);
       // INDIR_CHANGE: to read bitmap for bitmap option
       if (afl->shm.indir_mode) {
-        read_bitmap_offset(afl->in_bitmap, afl->indir_virgin_bits, afl->fsrv.indir_map_size, afl->fsrv.map_size);
+
+        read_bitmap_offset(afl->in_bitmap, afl->indir_virgin_bits,
+                           afl->fsrv.indir_map_size, afl->fsrv.map_size);
+
       }
 
     } else {
@@ -3360,10 +3443,12 @@ int main(int argc, char **argv_orig, char **envp) {
 
     memset(afl->virgin_tmout, 255, map_size);
     memset(afl->virgin_crash, 255, map_size);
-    // INDIR_CHANGE: indir virgin map 
+    // INDIR_CHANGE: indir virgin map
     if (afl->shm.indir_mode) {
+
       memset(afl->indir_virgin_tmout, 255, afl->shm.indir_map_size);
       memset(afl->indir_virgin_crash, 255, afl->shm.indir_map_size);
+
     }
 
     if (likely(!afl->afl_env.afl_no_startup_calibration)) {
@@ -4083,15 +4168,22 @@ stop_fuzzing:
 
         // INDIR_CHANGE: save trace_mini_indir
         if (afl->shm.indir_mode) {
+
           u32 indir_m_len = afl->shm.indir_map_size;
           if (!q->trace_mini_indir) {
+
             ZLIBWRITE(fr_fd, off, 1, "no_indir_mini");
             w += 1;
+
           } else {
+
             ZLIBWRITE(fr_fd, on, 1, "yes_indir_mini");
-            ZLIBWRITE(fr_fd, q->trace_mini_indir, indir_m_len, "trace_mini_indir");
+            ZLIBWRITE(fr_fd, q->trace_mini_indir, indir_m_len,
+                      "trace_mini_indir");
             w += indir_m_len + 1;
+
           }
+
         }
 
       }

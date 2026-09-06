@@ -165,10 +165,11 @@ static u8  __afl_area_initial[MAP_INITIAL_SIZE];
 static u8 *__afl_area_ptr_dummy = __afl_area_initial;
 static u8 *__afl_area_ptr_backup = __afl_area_initial;
 
-u8        *__afl_area_ptr = __afl_area_initial;
+u8 *__afl_area_ptr = __afl_area_initial;
 
 /// INDIR_CHANGE: dummy map and dynamic sizes
-static u8  __afl_indir_initial[4096]; // (size does not matter, it's just a page, reallocated after)
+static u8 __afl_indir_initial[4096];  // (size does not matter, it's just a
+                                      // page, reallocated after)
 static u8 *__afl_indir_ptr_dummy = __afl_indir_initial;
 u8        *__afl_indir_ptr = __afl_indir_initial;
 
@@ -787,6 +788,7 @@ static void __afl_map_shm(void) {
     if (__afl_area_initial != __afl_area_ptr_dummy) {
 
       free(__afl_area_ptr_dummy);
+
     }
 
     __afl_map_size = __afl_final_loc + 1;
@@ -914,71 +916,114 @@ static void __afl_map_shm(void) {
   id_str = getenv(INDIR_SHM_ENV_VAR);
 
   if (__afl_debug) {
+
     fprintf(stderr, "DEBUG: indir id_str %s\n",
             id_str == NULL ? "<null>" : id_str);
+
   }
-  
-  // INDIR_CHANGE: read AFL_INDIR_MAP_SIZE var to get size
+
+  // INDIR_CHANGE: read AFL_INDIR_MAP_SIZE var to get size (in bytes)
   char *indir_size_str = getenv("AFL_INDIR_MAP_SIZE");
-  u32 env_indir_val = 0;
-  if (indir_size_str) { env_indir_val = atoi(indir_size_str) / sizeof(indir_slot_t); }
-  
+  u32   env_indir_val = 0;
+  if (indir_size_str) { env_indir_val = atoi(indir_size_str); }
+
   if (__afl_indir_final_loc) {
-      __afl_indir_map_size = __afl_indir_final_loc + 1;
+
+    __afl_indir_map_size = (__afl_indir_final_loc + 1) * sizeof(indir_slot_t);
+
   } else {
-      __afl_indir_map_size = DEFAULT_INDIR_SHMEM_SIZE / sizeof(indir_slot_t);
+
+    __afl_indir_map_size = DEFAULT_INDIR_SHMEM_SIZE;
+
   }
-  // Uses the env var only if bigger
-  if (env_indir_val > __afl_indir_map_size) {
-      __afl_indir_map_size = env_indir_val;
+
+  // Align to 64 bytes for word/SIMD iteration safety
+  if (__afl_indir_map_size % 64) {
+
+    __afl_indir_map_size = (((__afl_indir_map_size + 63) >> 6) << 6);
+
+  }
+
+  // INDIR_CHANGE: allow runtime map size to downsize to active indirect
+  // locations
+  if (!__afl_indir_final_loc && env_indir_val > 0) {
+
+    __afl_indir_map_size = env_indir_val;
+
   }
 
   if (__afl_debug) {
-    fprintf(stderr, "DEBUG: Indirect jumps map size: %u\n", __afl_indir_map_size);
+
+    fprintf(stderr, "DEBUG: Indirect jumps map size: %u bytes\n",
+            __afl_indir_map_size);
+
   }
 
   // INDIR_CHANGE: check that the indir map is not too small (prevent OOB read)
-  if (__afl_indir_map_size * sizeof(indir_slot_t) > 4096) {
-    if (__afl_indir_initial != __afl_indir_ptr_dummy) { free(__afl_indir_ptr_dummy); }
-    __afl_indir_ptr_dummy = (u8 *)malloc(__afl_indir_map_size * sizeof(indir_slot_t));
-    if (!__afl_indir_ptr_dummy) {
-      fprintf(stderr, "Error: AFL++ could not acquire %zu bytes of memory for indir map, exiting!\n", (size_t)(__afl_indir_map_size * sizeof(indir_slot_t)));
-      exit(-1);
+  if (__afl_indir_map_size > 4096) {
+
+    if (__afl_indir_initial != __afl_indir_ptr_dummy) {
+
+      free(__afl_indir_ptr_dummy);
+
     }
+
+    __afl_indir_ptr_dummy = (u8 *)malloc(__afl_indir_map_size);
+    if (!__afl_indir_ptr_dummy) {
+
+      fprintf(
+          stderr,
+          "Error: AFL++ could not acquire %u bytes of memory for indir map, "
+          "exiting!\n",
+          __afl_indir_map_size);
+      exit(-1);
+
+    }
+
   }
 
   if (id_str) {
+
 #ifdef USEMMAP
-    const char     *shm_file_path = id_str;
-    int             shm_fd = -1;
-    u8             *shm_base = NULL;
+    const char *shm_file_path = id_str;
+    int         shm_fd = -1;
+    u8         *shm_base = NULL;
 
     shm_fd = shm_open(shm_file_path, O_RDWR, DEFAULT_PERMISSION);
     if (shm_fd == -1) {
+
       perror("shm_open() failed\n");
       send_forkserver_error(FS_ERROR_SHM_OPEN);
       exit(1);
+
     }
 
     /* map the shared memory segment to the address space of the process */
-    size_t indir_shm_bytes = __afl_indir_map_size * sizeof(indir_slot_t);
-    shm_base = mmap(0, indir_shm_bytes, PROT_READ | PROT_WRITE,
-                    MAP_SHARED, shm_fd, 0);
+    size_t indir_shm_bytes = __afl_indir_map_size;
+    shm_base =
+        mmap(0, indir_shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
 
     if (shm_base == MAP_FAILED) {
+
       close(shm_fd);
       shm_fd = -1;
       fprintf(stderr, "mmap() failed\n");
       send_forkserver_error(FS_ERROR_SHM_OPEN);
       exit(2);
+
     }
 
     // INDIR_CHANGE: use dummy if map too smol
     if (env_indir_val == 0 || __afl_indir_map_size <= env_indir_val) {
+
       __afl_indir_ptr = shm_base;
+
     } else {
+
       __afl_indir_ptr = __afl_indir_ptr_dummy;
+
     }
+
     close(shm_fd);
     shm_fd = -1;
 #else
@@ -986,22 +1031,33 @@ static void __afl_map_shm(void) {
     u8 *shm_base = (u8 *)shmat(shm_id, NULL, 0);
 
     if (!shm_base || shm_base == (void *)-1) {
+
       perror("shmat for indir map");
       send_forkserver_error(FS_ERROR_SHM_OPEN);
       _exit(1);
+
     }
+
     // INDIR_CHANGE: as above, if map too smol ...
     if (env_indir_val == 0 || __afl_indir_map_size <= env_indir_val) {
+
       __afl_indir_ptr = shm_base;
+
     } else {
+
       __afl_indir_ptr = __afl_indir_ptr_dummy;
+
     }
+
 #endif
+
   } else {
-    __afl_indir_ptr= __afl_indir_ptr_dummy;
+
+    __afl_indir_ptr = __afl_indir_ptr_dummy;
+
   }
 
-// }
+  // }
 
 #ifdef __AFL_CODE_COVERAGE
   char *pcmap_id_str = getenv("__AFL_PCMAP_SHM_ID");
@@ -1129,15 +1185,20 @@ static void __afl_unmap_shm(void) {
   // INDIR_CHANGE: cleanup, as above
   id_str = getenv(INDIR_SHM_ENV_VAR);
   if (id_str) {
+
     if (__afl_indir_ptr && __afl_indir_ptr != __afl_indir_initial &&
         __afl_indir_ptr != __afl_indir_ptr_dummy) {
+
 #ifdef USEMMAP
-      munmap((void *)__afl_indir_ptr, __afl_indir_map_size * sizeof(indir_slot_t));
+      munmap((void *)__afl_indir_ptr, __afl_indir_map_size);
 #else
       shmdt((void *)__afl_indir_ptr);
 #endif
+
     }
+
     __afl_indir_ptr = __afl_indir_ptr_dummy;
+
   }
 
   __afl_already_initialized_shm = 0;
@@ -1295,10 +1356,12 @@ static void __afl_start_forkserver(void) {
     status = __afl_map_size;
     if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
 
-    // INDIR_CHANGE: send indir map size to fsrv fd
+    // INDIR_CHANGE: send indir map size in bytes to fsrv fd
     if (__afl_indir_final_loc > 0) {
-        u32 indir_sz = __afl_indir_map_size * sizeof(indir_slot_t);
-        if (write(FORKSRV_FD + 1, &indir_sz, 4) != 4) { _exit(1); }
+
+      u32 indir_sz = __afl_indir_map_size;
+      if (write(FORKSRV_FD + 1, &indir_sz, 4) != 4) { _exit(1); }
+
     }
 
     // FS_NEW_OPT_SHDMEM_FUZZ - no data
@@ -1513,7 +1576,8 @@ int __afl_persistent_loop(unsigned int max_cnt) {
     memset_noasan(__afl_area_ptr, 0, __afl_set_map_size);
     __afl_area_ptr[0] = 1;
     memset_noasan(__afl_prev_loc, 0, NGRAM_SIZE_MAX * sizeof(PREV_LOC_T));
-    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(indir_slot_t));
+    // INDIR_CHANGE: clear only active bytes
+    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size);
 
     first_pass = 0;
     __afl_selective_coverage_temp = 1;
@@ -1580,7 +1644,8 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 
     memset_noasan(__afl_prev_loc, 0, NGRAM_SIZE_MAX * sizeof(PREV_LOC_T));
 
-    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size * sizeof(indir_slot_t));
+    // INDIR_CHANGE: clear only active bytes
+    memset_noasan(__afl_indir_ptr, 0, __afl_indir_map_size);
 
     return 1;
 
@@ -2479,53 +2544,96 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
   if (__afl_indir_final_loc < 1) __afl_indir_final_loc = 1;
 
   if (__afl_already_initialized_forkserver) {
+
     if (!getenv("AFL_IGNORE_PROBLEMS")) {
+
       fprintf(stderr, "[-] FATAL: forkserver already up, indir dlopen'd\n");
       abort();
+
     }
 
-    // INDIR_CHANGE: Check if user explicitly requested to ignore coverage from the DSO
+    // INDIR_CHANGE: Check if user explicitly requested to ignore coverage from
+    // the DSO
     u8 ignore_dso_after_fs = !!getenv("AFL_IGNORE_PROBLEMS_COVERAGE");
 
-    // INDIR_CHANGE: Fix OOB when __afl_indir_final_loc <= 1 and allow using last slot.
+    // INDIR_CHANGE: Fix OOB when __afl_indir_final_loc <= 1 and allow using
+    // last slot.
     if (__afl_indir_final_loc <= 1) {
+
       while (start < stop) {
+
         *(start++) = 0;
+
       }
+
       return;
+
     }
+
     static u32 offset = 2;
     while (start < stop) {
+
       // INDIR_CHANGE: ignore coverage from DSO
       if (!ignore_dso_after_fs) {
+
         *(start++) = offset;
         if (++offset > __afl_indir_final_loc) offset = 2;
+
       } else {
+
         *(start++) = 0;
+
       }
+
     }
+
     return;
+
   }
 
   while (start < stop) {
+
     *(start++) = ++__afl_indir_final_loc;
+
+  }
+
+  // INDIR_CHANGE: track needed size strictly in bytes
+  u32 needed_indir_bytes = (__afl_indir_final_loc + 1) * sizeof(indir_slot_t);
+  if (needed_indir_bytes % 64) {
+
+    needed_indir_bytes = (((needed_indir_bytes + 63) >> 6) << 6);
+
   }
 
   if (__afl_already_initialized_shm) {
-    if (__afl_indir_final_loc + 1 > __afl_indir_map_size) {
+
+    if (needed_indir_bytes > __afl_indir_map_size) {
+
       if (__afl_debug) {
+
         fprintf(stderr, "DEBUG: Reinit shm necessary for indir (+%u)\n",
-                __afl_indir_final_loc + 1 - __afl_indir_map_size);
+                needed_indir_bytes - __afl_indir_map_size);
+
       }
+
       __afl_unmap_shm();
       __afl_map_shm();
+
     }
+
   }
 
-  // INDIR_CHANGE: only expand, never shrink
-  if (__afl_indir_final_loc + 1 > __afl_indir_map_size) {
-    __afl_indir_map_size = __afl_indir_final_loc + 1;
+  // INDIR_CHANGE: set exact needed map size before forkserver, grow for DSOs
+  if (!__afl_already_initialized_forkserver) {
+
+    __afl_indir_map_size = needed_indir_bytes;
+
+  } else if (needed_indir_bytes > __afl_indir_map_size) {
+
+    __afl_indir_map_size = needed_indir_bytes;
+
   }
+
 }
 
 ///// CmpLog instrumentation
@@ -3859,16 +3967,27 @@ uint32_t ijon_memdist(char *a, char *b, size_t len) {
 
 }
 
-//INDIR_CHANGE: trace indir callback
+// INDIR_CHANGE: trace indir fallback callback with relative displacement &
+// atomic OR
 void __afl_trace_indir(uint32_t *guard, uintptr_t target_addr) {
+
   if (unlikely(!__afl_indir_ptr || __afl_indir_ptr == __afl_indir_ptr_dummy))
     return;
 
   if (unlikely(!(*guard))) return;
 
-  indir_slot_t *indir_map_slots = (indir_slot_t *)__afl_indir_ptr;
-  // Multiplicative hash, then take top INDIR_BIT_SHIFT bits for bit index
-  uint8_t bit_idx = (uint8_t)(((target_addr >> 4) * 0x9E3779B97F4A7C15ULL) >> (64 - INDIR_BIT_SHIFT));
+  // INDIR_CHANGE: relative displacement calculation
+  uintptr_t caller_pc = (uintptr_t)__builtin_return_address(0);
+  uintptr_t displacement = target_addr - caller_pc;
 
-  indir_map_slots[*guard] |= ((indir_slot_t)1 << bit_idx);
+  indir_slot_t *indir_map_slots = (indir_slot_t *)__afl_indir_ptr;
+  // Multiplicative hash on relative displacement
+  uint8_t bit_idx =
+      (uint8_t)((((uint64_t)displacement) * 0x9E3779B97F4A7C15ULL) >>
+                (64 - INDIR_BIT_SHIFT));
+
+  indir_slot_t mask = (indir_slot_t)1 << bit_idx;
+  __atomic_fetch_or(&indir_map_slots[*guard], mask, __ATOMIC_RELAXED);
+
 }
+

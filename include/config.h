@@ -43,16 +43,19 @@
    Default: 8MB (defined in bytes) */
 #define DEFAULT_SHMEM_SIZE (8 * 1024 * 1024)
 
-// INDIR_CHANGE: Renamed INDIR_SHMEM_SIZE to DEFAULT_INDIR_SHMEM_SIZE, added env var for map size
-// The slot size is configurable via compile time parameters
+// INDIR_CHANGE: slot size and default sizing configuration
 #ifndef INDIR_SLOT_SIZE
-#define INDIR_SLOT_SIZE 64
+  #define INDIR_SLOT_SIZE 64
 #endif
-// #define DEFAULT_INDIR_SHMEM_SIZE (512 * INDIR_SLOT_SIZE / 8)
-// TEMP FIX: size should just be "big enough", it is currently NOT working
-// it crashes during initialization
-#define DEFAULT_INDIR_SHMEM_SIZE 65536
+
+// Initial allocation: 4096 bytes (512 slots of 64-bit) before forkserver
+// handshake
+#define DEFAULT_INDIR_SHMEM_SIZE (512 * (INDIR_SLOT_SIZE / 8))
 #define INDIR_MAP_SIZE_ENV_VAR "AFL_INDIR_MAP_SIZE"
+
+// Minimum CFG edge coverage required before indirect coverage can award favored
+// status
+#define MIN_EDGE_FOR_INDIR_FAV 4
 
 /* Default time until when no more coverage finds are happening afl-fuzz
    switches to exploitation mode. It automatically switches back when new
@@ -441,7 +444,7 @@
 /* Environment variable used to pass SHM ID to the called program. */
 
 #define SHM_ENV_VAR "__AFL_SHM_ID"
-//INDIR_CHANGE
+// INDIR_CHANGE
 #define INDIR_SHM_ENV_VAR "__AFL_INDIR_SHM_ID"
 
 /* Environment variable used to pass shared memory fuzz map id

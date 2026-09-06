@@ -303,7 +303,6 @@ struct queue_entry {
   // INDIR_CHANGE: new param for indir stuff
   u32 tc_ref_indir;                     /* Indirect trace bytes ref count   */
 
-
 #ifdef INTROSPECTION
   u32 bitsmap_size;
 #endif
@@ -311,13 +310,13 @@ struct queue_entry {
   double perf_score,                    /* performance score                */
       weight;
 
-  struct queue_entry *mother;            /* queue entry this based on        */
-  u8                 *trace_mini;        /* Trace bytes, if kept             */
+  struct queue_entry *mother;           /* queue entry this based on        */
+  u8                 *trace_mini;       /* Trace bytes, if kept             */
   // INDIR_CHANGE: same as above, but indir
-  u8                 *trace_mini_indir;  /* Indirect trace bytes, if kept    */
-  u8                 *testcase_buf;      /* The testcase buffer, if loaded.  */
-  u8                 *cmplog_colorinput; /* the result buf of colorization   */
-  struct tainted     *taint;             /* Taint information from CmpLog    */
+  u8             *trace_mini_indir;     /* Indirect trace bytes, if kept    */
+  u8             *testcase_buf;         /* The testcase buffer, if loaded.  */
+  u8             *cmplog_colorinput;    /* the result buf of colorization   */
+  struct tainted *taint;                /* Taint information from CmpLog    */
   struct skipdet_entry *skipdet_e;
 
   u8 fs_status;                         /* Frameshift status                */
@@ -570,12 +569,19 @@ struct foreign_sync {
 
 typedef struct afl_state {
 
-  // INDIR_CHANGE
-  u8 *indir_trace_bits,  // map
-    *indir_virgin_bits,  // coverage state
-    *indir_virgin_tmout, // timeouts state
-    *indir_virgin_crash; // crashes state
-  
+  // INDIR_CHANGE: indirect coverage state and buffers
+  u8 *indir_trace_bits;
+  u8 *indir_virgin_bits;
+  u8 *indir_virgin_tmout;
+  u8 *indir_virgin_crash;
+  u8 *indir_var_bytes;   /* Variable bitmask for fluctuating indirect slots */
+  u8 *clean_trace_indir; /* Snapshot buffer for restoring trace after trimming
+                          */
+  u8 *baseline_trace_indir; /* Baseline snapshot buffer for trimming subset
+                               check */
+  u8 *first_trace_indir; /* Initial trace buffer for calibration comparison */
+  u8 *indir_map_tmp_buf;   /* Static reusable working buffer for cull_queue */
+
   /* Position of this state in the global states list */
   u32 _id;
 
@@ -798,7 +804,7 @@ typedef struct afl_state {
 
   u64 total_bitmap_size,                /* Total bit count for all bitmaps  */
       // INDIR_CHANGE
-      total_indir_bitmap_size,          /* Total bit count for all indir bitmaps */
+      total_indir_bitmap_size,     /* Total bit count for all indir bitmaps */
       total_bitmap_entries;             /* Number of bitmaps counted        */
 
   s32 cpu_core_count,                   /* CPU core count                   */
@@ -817,9 +823,8 @@ typedef struct afl_state {
 
   struct queue_entry **top_rated;           /* Top entries for bitmap bytes */
   // INDIR_CHANGE: new list of top entries (everybody cheer)
-  struct queue_entry **indir_top_rated;     /* Top entries for indir map bytes */
-  u32 **indir_top_rated_candidates;
-
+  struct queue_entry **indir_top_rated;  /* Top entries for indir map bytes */
+  u32                **indir_top_rated_candidates;
 
   u32 **top_rated_candidates;             /* Candidate IDs per bitmap index */
 
@@ -1319,7 +1324,7 @@ void minimize_indir_bits(afl_state_t *afl, u8 *dst, u8 *src);
 void write_bitmap(afl_state_t *);
 u32  count_bits(afl_state_t *, u8 *);
 // INDIR_CHANGE
-u32 count_indir_bits(afl_state_t *afl);
+u32  count_indir_bits(afl_state_t *afl);
 u32  count_bytes(afl_state_t *, u8 *);
 u32  count_indir_bits_run(afl_state_t *, u8 *);
 u32  count_non_255_bytes(afl_state_t *, u8 *);
@@ -1336,8 +1341,9 @@ u8 *describe_op(afl_state_t *, u8, size_t);
 #endif
 u8 save_if_interesting(afl_state_t *, void *, u32, u8);
 u8 has_new_bits(afl_state_t *, u8 *);
-// INDIR_CHANGE
+// INDIR_CHANGE: novelty checks for indirect coverage
 u8 has_indir_new_bits_map(afl_state_t *, u8 *);
+u8 check_indir_new_bits_map(afl_state_t *, const u8 *);
 #ifndef AFL_SHOWMAP
 void classify_counts(afl_forkserver_t *);
 #endif

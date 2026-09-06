@@ -953,9 +953,11 @@ void perform_dry_run(afl_state_t *afl) {
 
       // INDIR_CHANGE: added indir map size
       SAYF(cGRA
-           "    len = %u, map size = %u, indir map size = %zu, exec speed = %llu us, hash = "
+           "    len = %u, map size = %u, indir map size = %zu, exec speed = "
+           "%llu us, hash = "
            "%016llx\n" cRST,
-           q->len, q->bitmap_size, afl->shm.indir_map_size, q->exec_us, q->exec_cksum);
+           q->len, q->bitmap_size, afl->shm.indir_map_size, q->exec_us,
+           q->exec_cksum);
 
     }
 
@@ -1217,11 +1219,9 @@ void perform_dry_run(afl_state_t *afl) {
 
             simplify_trace(afl, afl->fsrv.trace_bits);
 
-            // INDIR_CHANGE
+            // INDIR_CHANGE: decouple initial crashing seed novelty from
+            // indirect bits
             u8 has_new = has_new_bits(afl, afl->virgin_crash);
-            if (afl->shm.indir_mode) {
-              has_new |= has_indir_new_bits_map(afl, afl->indir_virgin_crash);
-            }
             if (!has_new) { break; }
 
           }

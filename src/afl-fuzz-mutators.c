@@ -483,6 +483,21 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
   }
 
+  // INDIR_CHANGE: snapshot unmodified baseline indirect trace before trimming
+  // starts
+  if (afl->shm.indir_mode && afl->clean_trace_indir &&
+      afl->baseline_trace_indir) {
+
+    (void)write_to_testcase(afl, (void **)&in_buf, q->len, 1);
+    fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
+    classify_counts(&afl->fsrv);
+    memcpy(afl->baseline_trace_indir, afl->fsrv.indir_bits,
+           afl->fsrv.indir_map_size);
+    memcpy(afl->clean_trace_indir, afl->fsrv.indir_bits,
+           afl->fsrv.indir_map_size);
+
+  }
+
   while (afl->stage_cur < afl->stage_max) {
 
     u8 *retbuf = NULL;
@@ -550,13 +565,27 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
     }
 
-    // INDIR_CHANGE: checksum added for the indir bitmap
-    u64 indir_cksum = 0;
-    if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
-      indir_cksum = hash64(afl->fsrv.indir_bits, afl->fsrv.indir_map_size, HASH_CONST);
+    // INDIR_CHANGE: check subset preservation for indirect trace
+    bool indir_preserved = true;
+    if (afl->shm.indir_mode && afl->baseline_trace_indir) {
+
+      for (u32 idx = 0; idx < afl->fsrv.indir_map_size; idx++) {
+
+        if ((afl->baseline_trace_indir[idx] & afl->fsrv.indir_bits[idx]) !=
+            afl->baseline_trace_indir[idx]) {
+
+          indir_preserved = false;
+          break;
+
+        }
+
+      }
+
     }
 
-    if (likely(retlen && cksum == q->exec_cksum && (!afl->shm.indir_mode || indir_cksum == q->indir_cksum))) {
+    // INDIR_CHANGE: require indirect subset preservation alongside edge
+    // checksum
+    if (likely(retlen && cksum == q->exec_cksum && indir_preserved)) {
 
       /* Let's save a clean trace, which will be needed by
          update_bitmap_score once we're done with the trimming stuff.
@@ -566,6 +595,15 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
         memcpy(afl->clean_trace_custom, afl->fsrv.trace_bits,
                afl->fsrv.map_size);
+
+      }
+
+      // INDIR_CHANGE: update clean_trace_indir to current trace on successful
+      // deletion
+      if (afl->shm.indir_mode && afl->clean_trace_indir) {
+
+        memcpy(afl->clean_trace_indir, afl->fsrv.indir_bits,
+               afl->fsrv.indir_map_size);
 
       }
 
@@ -648,6 +686,14 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
     q->len = out_len;
 
     memcpy(afl->fsrv.trace_bits, afl->clean_trace_custom, afl->fsrv.map_size);
+    // INDIR_CHANGE: restore indirect trace bits from clean snapshot
+    if (afl->shm.indir_mode && afl->clean_trace_indir) {
+
+      memcpy(afl->fsrv.indir_bits, afl->clean_trace_indir,
+             afl->fsrv.indir_map_size);
+
+    }
+
     update_bitmap_score(afl, q, true);
 
   }
