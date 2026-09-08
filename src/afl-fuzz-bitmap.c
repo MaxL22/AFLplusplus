@@ -147,18 +147,18 @@ u32 count_bits(afl_state_t *afl, u8 *mem) {
 
 }
 
-// INDIR_CHANGE: guard against inactive indirect mode or NULL virgin bits
+// INDIR_CHANGE: guard against inactive indirect mode and skip dummy slot 0
 u32 count_indir_bits(afl_state_t *afl) {
 
   if (!afl->shm.indir_mode || !afl->indir_virgin_bits ||
-      !afl->fsrv.indir_map_size) {
+      afl->fsrv.indir_map_size <= sizeof(indir_slot_t)) {
 
     return 0;
 
   }
 
-  u32 *ptr = (u32 *)afl->indir_virgin_bits;
-  u32  i = (afl->fsrv.indir_map_size >> 2);
+  u32 *ptr = (u32 *)(afl->indir_virgin_bits + sizeof(indir_slot_t));
+  u32  i = ((afl->fsrv.indir_map_size - sizeof(indir_slot_t)) >> 2);
   u32  ret = 0;
 
   // Counting zeros: we have the virgin map, bits are set to zero as they are

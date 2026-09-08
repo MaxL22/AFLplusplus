@@ -1315,7 +1315,7 @@ void cull_queue(afl_state_t *);
 u32  calculate_score(afl_state_t *, struct queue_entry *);
 void recalculate_all_scores(afl_state_t *);
 void update_bitmap_rescore(afl_state_t *, struct queue_entry *, u32);
-// New functions for indir bitmap scoring
+// INDIR_CHANGE: New functions for indir bitmap scoring
 void update_bitmap_indir_rescore(afl_state_t *, struct queue_entry *, u32);
 void minimize_indir_bits(afl_state_t *afl, u8 *dst, u8 *src);
 
