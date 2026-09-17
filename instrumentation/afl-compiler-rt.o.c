@@ -1271,7 +1271,9 @@ static void __afl_start_forkserver(void) {
     __afl_set_map_size = __afl_map_size - MAP_SIZE_IJON_BYTES;
     __afl_ijon_map_increased = 1;
 
-  } else if (!__afl_cov_map_size) {
+    // INDIR_CHANGE: keep __afl_set_map_size in sync for persistent loop zeroing
+
+  } else if (!__afl_ijon_enabled) {
 
     __afl_set_map_size = __afl_cov_map_size = __afl_map_size;
 
@@ -2529,6 +2531,13 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
       __afl_map_size += MAP_SIZE_IJON_MAP + MAP_SIZE_IJON_BYTES;
       __afl_set_map_size = __afl_map_size - MAP_SIZE_IJON_BYTES;
       __afl_ijon_map_increased = 1;
+
+      // INDIR_CHANGE: keep __afl_set_map_size in sync for persistent loop
+      // zeroing
+
+    } else if (!__afl_ijon_enabled) {
+
+      __afl_set_map_size = __afl_cov_map_size = __afl_map_size;
 
     }
 

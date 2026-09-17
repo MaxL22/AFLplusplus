@@ -2799,13 +2799,20 @@ int main(int argc, char **argv_orig, char **envp) {
     // It has been changed to accommodate the second map
     if (needs_resize || indir_needs_resize) {
 
-      OKF("Re-initializing maps to %u bytes (indir: %u bytes)", new_map_size,
-          new_indir_map_size);
+      // INDIR_CHANGE: ensure primary edge map is never downsized below MAP_SIZE
+      // (64KB) or DEFAULT_SHMEM_SIZE
+      u32 primary_alloc_size =
+          needs_resize ? new_map_size : MAX(map_size, (u32)MAP_SIZE);
+
+      OKF("Re-initializing maps to %u bytes (indir: %u bytes)",
+          primary_alloc_size, new_indir_map_size);
       if (needs_resize) { afl_resize_map_buffers(afl, map_size, new_map_size); }
 
       afl_fsrv_kill(&afl->fsrv);
       afl_shm_deinit(&afl->shm);
-      if (needs_resize) { afl->fsrv.map_size = new_map_size; }
+      // INDIR_CHANGE: keep afl->fsrv.map_size at primary_alloc_size for safe
+      // shm allocation
+      afl->fsrv.map_size = primary_alloc_size;
 
       if (indir_needs_resize) {
 
@@ -2878,15 +2885,23 @@ int main(int argc, char **argv_orig, char **envp) {
 
       }
 
+      // INDIR_CHANGE: allocate primary shared memory using safe clamped
+      // primary_alloc_size
       afl->fsrv.trace_bits = afl_shm_init(
-          &afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode, afl->perm,
+          &afl->shm, primary_alloc_size, afl->non_instrumented_mode, afl->perm,
           afl->chown_needed ? afl->fsrv.gid : -1);
       setenv("AFL_NO_AUTODICT", "1", 1);  // loaded already
       // INDIR_CHANGE
       afl->fsrv.indir_bits = afl->shm.indir_map;
 
   #ifdef __AFL_CODE_COVERAGE
-      if (getenv("AFL_DUMP_PC_MAP")) { afl_pcmap_resize(afl, new_map_size); }
+      // INDIR_CHANGE: only resize pcmap if primary map actually expanded
+      if (needs_resize && getenv("AFL_DUMP_PC_MAP")) {
+
+        afl_pcmap_resize(afl, new_map_size);
+
+      }
+
   #endif
 
       afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
