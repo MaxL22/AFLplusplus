@@ -53,9 +53,21 @@
 #define DEFAULT_INDIR_SHMEM_SIZE (512 * (INDIR_SLOT_SIZE / 8))
 #define INDIR_MAP_SIZE_ENV_VAR "AFL_INDIR_MAP_SIZE"
 
-// Minimum CFG edge coverage required before indirect coverage can award favored
-// status
-#define MIN_EDGE_FOR_INDIR_FAV 4
+// INDIR_CHANGE: hash of an indirect target (instrumentation and runtime).
+// Only the page offset is hashed because ASLR never changes it, which keeps
+// targets in other DSOs deterministic across forkserver sessions, parallel
+// instances and resumes.
+#define INDIR_TARGET_KEY_MASK 0xfffU
+#define INDIR_TARGET_HASH_MUL 0x9E3779B1U
+
+// INDIR_CHANGE: maximum number of queue entries that may be saved for
+// indirect-only novelty (no new edge or hit-count bucket) per indirect call
+// site. Can be changed at fuzz time with AFL_INDIR_MAX_PER_SITE (0 = no cap).
+#define INDIR_ONLY_MAX_PER_SITE 8
+
+// INDIR_CHANGE: cull_queue() favors entries for indirect bits that no edge
+// favorite covers, but at most this percentage of the edge favorites (min 1)
+#define INDIR_FAV_MAX_PERCENT 25
 
 /* Default time until when no more coverage finds are happening afl-fuzz
    switches to exploitation mode. It automatically switches back when new

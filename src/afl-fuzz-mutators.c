@@ -483,21 +483,6 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
   }
 
-  // INDIR_CHANGE: snapshot unmodified baseline indirect trace before trimming
-  // starts
-  if (afl->shm.indir_mode && afl->clean_trace_indir &&
-      afl->baseline_trace_indir) {
-
-    (void)write_to_testcase(afl, (void **)&in_buf, q->len, 1);
-    fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
-    classify_counts(&afl->fsrv);
-    memcpy(afl->baseline_trace_indir, afl->fsrv.indir_bits,
-           afl->fsrv.indir_map_size);
-    memcpy(afl->clean_trace_indir, afl->fsrv.indir_bits,
-           afl->fsrv.indir_map_size);
-
-  }
-
   while (afl->stage_cur < afl->stage_max) {
 
     u8 *retbuf = NULL;
@@ -565,27 +550,9 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
     }
 
-    // INDIR_CHANGE: check subset preservation for indirect trace
-    bool indir_preserved = true;
-    if (afl->shm.indir_mode && afl->baseline_trace_indir) {
-
-      for (u32 idx = 0; idx < afl->fsrv.indir_map_size; idx++) {
-
-        if ((afl->baseline_trace_indir[idx] & afl->fsrv.indir_bits[idx]) !=
-            afl->baseline_trace_indir[idx]) {
-
-          indir_preserved = false;
-          break;
-
-        }
-
-      }
-
-    }
-
-    // INDIR_CHANGE: require indirect subset preservation alongside edge
-    // checksum
-    if (likely(retlen && cksum == q->exec_cksum && indir_preserved)) {
+    // INDIR_CHANGE: the indirect trace must be preserved too
+    if (likely(retlen && cksum == q->exec_cksum &&
+               indir_trace_unchanged(afl, q))) {
 
       /* Let's save a clean trace, which will be needed by
          update_bitmap_score once we're done with the trimming stuff.

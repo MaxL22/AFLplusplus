@@ -776,11 +776,7 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
           "%u handled and %u unhandled special instructions.%s",
           instr, modeline, selects, unhandled, buf);
       // INDIR_CHANGE; new print for indir stuff
-      if (indir_enable) {
-
-        OKF("Instrumented %u indirect locations I guess", indir);
-
-      }
+      if (indir_enable) { OKF("Instrumented %u indirect locations.", indir); }
 
       if (getenv("AFL_LLVM_IJON")) {
 
@@ -1028,11 +1024,9 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
 
   IntegerType *SlotTy = IntegerType::getIntNTy(*C, INDIR_SLOT_SIZE);
   ConstantInt *OneSlot = ConstantInt::get(SlotTy, 1);
-  ConstantInt *ZeroSlot = ConstantInt::get(SlotTy, 0);
-  ConstantInt *KnuthConst64 =
-      ConstantInt::get(cast<IntegerType>(Int64Ty), 0x9E3779B97F4A7C15ULL);
-  ConstantInt *ShiftAmt64 =
-      ConstantInt::get(cast<IntegerType>(Int64Ty), 64 - INDIR_BIT_SHIFT);
+  Constant    *KeyMask = ConstantInt::get(Int32Ty, INDIR_TARGET_KEY_MASK);
+  Constant    *HashMul = ConstantInt::get(Int32Ty, INDIR_TARGET_HASH_MUL);
+  Constant    *HashShift = ConstantInt::get(Int32Ty, 32 - INDIR_BIT_SHIFT);
 
   uint32_t local_idx = 0;
 
@@ -1051,71 +1045,21 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
 
     if (!TargetPtr) continue;
 
-    // 2. Determine safe insertion point
-    Instruction *InsertBefore = nullptr;
-    auto        *callInst = dyn_cast<CallInst>(IN);
-    auto        *invokeInst = dyn_cast<InvokeInst>(IN);
+    // 2. INDIR_CHANGE: always record before the instruction. Recording after a
+    // call loses every (site, target) pair whose callee longjmp()s, throws or
+    // exits. A null target would crash right away, and crashing runs are never
+    // judged on the indirect map, so no phantom suppression is needed.
+    IRBuilder<> IRB(IN);
 
-    if (callInst && !callInst->doesNotReturn() && callInst->getNextNode()) {
-
-      // Returning call: insert post-call to eliminate phantom coverage
-      InsertBefore = callInst->getNextNode();
-
-    } else if (invokeInst) {
-
-      BasicBlock *NormalDest = invokeInst->getNormalDest();
-      if (NormalDest->getSinglePredecessor() == invokeInst->getParent()) {
-
-        InsertBefore = &*NormalDest->getFirstInsertionPt();
-
-      } else {
-
-        // Multi-predecessor critical edge: insert pre-invoke to avoid verifier
-        // dominance failure
-        InsertBefore = invokeInst;
-
-      }
-
-    } else {
-
-      // Terminators (IndirectBr, CallBr) and noreturn calls: insert
-      // pre-instruction
-      InsertBefore = IN;
-
-    }
-
-    IRBuilder<> IRB(InsertBefore);
-
-    // 3. Compute relative ASLR-invariant displacement
+    // 3. INDIR_CHANGE: hash the page offset of the target. ASLR only moves
+    // modules by whole pages, so this is stable for targets in other DSOs
+    // too, unlike a displacement from the calling function.
     Value *TargetAddrInt = IRB.CreatePtrToInt(TargetPtr, IntptrTy);
-    Value *FuncAddr = IRB.CreatePtrToInt(&F, IntptrTy);
-    Value *Displacement = IRB.CreateSub(TargetAddrInt, FuncAddr);
-
-    // Shift: preserve basic block labels for IndirectBr
-    unsigned Shift = isa<IndirectBrInst>(IN) ? 0 : 4;
-    Value   *Shifted =
-        (Shift > 0)
-              ? IRB.CreateLShr(Displacement, ConstantInt::get(IntptrTy, Shift))
-              : Displacement;
-
-    // Zero-extend to 64-bit for Knuth multiplication (safe on 32-bit and 64-bit
-    // targets)
-    Value *Shifted64 = IRB.CreateZExtOrTrunc(Shifted, Int64Ty);
-    Value *Hashed64 = IRB.CreateMul(Shifted64, KnuthConst64);
-    Value *BitIdx64 = IRB.CreateLShr(Hashed64, ShiftAmt64);
-    Value *BitIdxSlot = IRB.CreateZExtOrTrunc(BitIdx64, SlotTy);
-    Value *RawBitMask = IRB.CreateShl(OneSlot, BitIdxSlot);
-
-    // Branchless phantom suppression: if pre-instruction and TargetPtr is NULL,
-    // mask to 0
-    Value *BitMask = RawBitMask;
-    if (InsertBefore == IN) {
-
-      Value *IsNonZero =
-          IRB.CreateICmpNE(TargetAddrInt, ConstantInt::get(IntptrTy, 0));
-      BitMask = IRB.CreateSelect(IsNonZero, RawBitMask, ZeroSlot);
-
-    }
+    Value *Key =
+        IRB.CreateAnd(IRB.CreateZExtOrTrunc(TargetAddrInt, Int32Ty), KeyMask);
+    Value *BitIdx = IRB.CreateLShr(IRB.CreateMul(Key, HashMul), HashShift);
+    Value *BitMask =
+        IRB.CreateShl(OneSlot, IRB.CreateZExtOrTrunc(BitIdx, SlotTy));
 
     // 4. Load guard and shared memory base pointer
     Value    *GuardPtr = createIndirGuardPointer(IRB, local_idx++);
@@ -1130,11 +1074,25 @@ bool ModuleSanitizerCoverageAFL::InjectIndirCoverage(
     // == 0
     Value *SlotPtr = IRB.CreateGEP(SlotTy, BasePtr, GuardVal);
 
-    // 6. Thread-safe atomic bitwise OR
-    auto *AtomicOp = IRB.CreateAtomicRMW(
-        llvm::AtomicRMWInst::BinOp::Or, SlotPtr, BitMask,
-        llvm::MaybeAlign(INDIR_SLOT_SIZE / 8), llvm::AtomicOrdering::Monotonic);
-    setNoInstrumentMetadata(AtomicOp);
+    // 6. INDIR_CHANGE: plain load/or/store like the edge counters; an atomic
+    // RMW (lock or) is only used with AFL_LLVM_THREADSAFE_INST.
+    if (use_threadsafe_counters) {
+
+      auto *AtomicOp =
+          IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Or, SlotPtr, BitMask,
+                              llvm::MaybeAlign(INDIR_SLOT_SIZE / 8),
+                              llvm::AtomicOrdering::Monotonic);
+      setNoInstrumentMetadata(AtomicOp);
+
+    } else {
+
+      LoadInst *Slot = IRB.CreateLoad(SlotTy, SlotPtr);
+      setNoSanitizeMetadata(Slot);
+      Value     *NewSlot = IRB.CreateOr(Slot, BitMask);
+      StoreInst *Store = IRB.CreateStore(NewSlot, SlotPtr);
+      setNoSanitizeMetadata(Store);
+
+    }
 
     indir++;
 

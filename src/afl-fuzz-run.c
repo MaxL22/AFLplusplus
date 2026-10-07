@@ -575,16 +575,15 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
     }
 
     hnb = has_new_bits(afl, afl->virgin_bits);
-    // INDIR_CHANGE: gate mutating vs non-mutating check on from_queue
+    // INDIR_CHANGE: gate mutating vs non-mutating check on from_queue.
+    // Indirect novelty ranks like a hit-count change (1), as in
+    // save_if_interesting().
     if (afl->shm.indir_mode) {
 
-      if (from_queue) {
+      if (from_queue ? has_indir_new_bits_map(afl, afl->indir_virgin_bits)
+                     : check_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
 
-        if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) { hnb = 2; }
-
-      } else {
-
-        if (check_indir_new_bits_map(afl, afl->indir_virgin_bits)) { hnb = 1; }
+        hnb = MAX(hnb, 1);
 
       }
 
@@ -633,12 +632,18 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
 
     classify_counts(&afl->fsrv);
     cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
-    // INDIR_CHANGE: checksum for indir
+    // INDIR_CHANGE: checksum for indir. An unknown (0) checksum of an entry
+    // whose edge checksum is known is taken from this run, instead of being
+    // reported as instability on every run.
     u64 indir_cksum = 0;
     if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
 
-      indir_cksum =
-          hash64(afl->fsrv.indir_bits, afl->fsrv.indir_map_size, HASH_CONST);
+      indir_cksum = hash_indir_trace(afl);
+      if (unlikely(q->exec_cksum && !q->indir_cksum)) {
+
+        q->indir_cksum = indir_cksum;
+
+      }
 
     }
 
@@ -646,20 +651,13 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
                  (afl->shm.indir_mode && q->indir_cksum != indir_cksum))) {
 
       hnb = has_new_bits(afl, afl->virgin_bits);
-      // INDIR_CHANGE: gate mutating vs non-mutating check on from_queue
+      // INDIR_CHANGE: as above, indirect novelty ranks as 1
       if (afl->shm.indir_mode) {
 
-        if (from_queue) {
+        if (from_queue ? has_indir_new_bits_map(afl, afl->indir_virgin_bits)
+                       : check_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
 
-          if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) { hnb = 2; }
-
-        } else {
-
-          if (check_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
-
-            hnb = 1;
-
-          }
+          hnb = MAX(hnb, 1);
 
         }
 
@@ -696,6 +694,7 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
 
               afl->indir_var_bytes[i] = 1;
               afl->indir_virgin_bits[i] = 0;
+              afl->indir_count_dirty = 1;
 
             }
 
@@ -776,9 +775,12 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
   if (unlikely(!q->exec_us)) { q->exec_us = 1; }
 
   q->bitmap_size = count_bytes(afl, afl->fsrv.trace_bits);
-  // INDIR_CHANGE: count indir bits
+  // INDIR_CHANGE: count indir bits. The checksum is refreshed with every
+  // variable byte found during this calibration masked, so it matches any
+  // stable run (trimming compares against it).
   if (afl->shm.indir_mode && afl->fsrv.indir_bits) {
 
+    q->indir_cksum = hash_indir_trace(afl);
     q->indir_bitmap_size = count_indir_bits_run(afl, afl->fsrv.indir_bits);
 
   }
@@ -1249,6 +1251,18 @@ void sync_fuzzers(afl_state_t *afl) {
 
 }
 
+/* INDIR_CHANGE: does the last run have the same indirect trace as q? Used by
+   the trimmers next to the edge checksum. Variable bytes are masked, so
+   flaky pairs do not block trimming, and no extra baseline run is needed. */
+
+bool indir_trace_unchanged(afl_state_t *afl, struct queue_entry *q) {
+
+  if (!afl->shm.indir_mode || !q->indir_cksum) { return true; }
+
+  return hash_indir_trace(afl) == q->indir_cksum;
+
+}
+
 /* Trim all new test cases to save cycles when doing deterministic checks. The
    trimmer uses power-of-two increments somewhere between 1/16 and 1/1024 of
    file size, to keep the stage short and sweet. */
@@ -1259,21 +1273,6 @@ u8 trim_case(afl_state_t *afl, struct queue_entry *q, u8 *in_buf) {
   u32 orig_len = q->len;
   u64 trim_start_us = get_cur_time_us();
   afl->bytes_trim_in += orig_len;
-
-  // INDIR_CHANGE: snapshot unmodified baseline indirect trace before trimming
-  // starts
-  if (afl->shm.indir_mode && afl->clean_trace_indir &&
-      afl->baseline_trace_indir) {
-
-    (void)write_to_testcase(afl, (void **)&in_buf, q->len, 1);
-    fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
-    classify_counts(&afl->fsrv);
-    memcpy(afl->baseline_trace_indir, afl->fsrv.indir_bits,
-           afl->fsrv.indir_map_size);
-    memcpy(afl->clean_trace_indir, afl->fsrv.indir_bits,
-           afl->fsrv.indir_map_size);
-
-  }
 
   /* Custom mutator trimmer */
   if (afl->custom_mutators_count) {
@@ -1365,32 +1364,15 @@ u8 trim_case(afl_state_t *afl, struct queue_entry *q, u8 *in_buf) {
       ++afl->trim_execs;
       classify_counts(&afl->fsrv);
       cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
-      // INDIR_CHANGE: check subset preservation for indirect trace
-      bool indir_preserved = true;
-      if (afl->shm.indir_mode && afl->baseline_trace_indir) {
-
-        for (u32 idx = 0; idx < afl->fsrv.indir_map_size; idx++) {
-
-          if ((afl->baseline_trace_indir[idx] & afl->fsrv.indir_bits[idx]) !=
-              afl->baseline_trace_indir[idx]) {
-
-            indir_preserved = false;
-            break;
-
-          }
-
-        }
-
-      }
 
       /* If the deletion had no impact on the trace, make it permanent. This
          isn't perfect for variable-path inputs, but we're just making a
          best-effort pass, so it's not a big deal if we end up with false
          negatives every now and then. */
 
-      // INDIR_CHANGE: require indirect subset preservation alongside edge
-      // checksum
-      if (cksum == q->exec_cksum && indir_preserved) {
+      // INDIR_CHANGE: the indirect trace must be preserved too (variable
+      // bytes masked, see hash_indir_trace())
+      if (cksum == q->exec_cksum && indir_trace_unchanged(afl, q)) {
 
         u32 move_tail = q->len - remove_pos - trim_avail;
 

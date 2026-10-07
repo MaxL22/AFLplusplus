@@ -916,6 +916,63 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
 
 /* Removes this afl_state instance and frees it. */
 
+/* INDIR_CHANGE: allocate (old_size == 0) or resize every buffer that is sized
+   by the indirect map. The grown part starts as "nothing seen yet"; slot 0
+   (the target's sink for sites without a guard) is always masked. */
+
+void afl_indir_resize_buffers(afl_state_t *afl, u32 old_size, u32 new_size) {
+
+  u32 old_slots = old_size / sizeof(indir_slot_t);
+  u32 new_slots = new_size / sizeof(indir_slot_t);
+
+  if (old_size > new_size && afl->indir_top_rated_candidates) {
+
+    for (u32 i = new_size * 8; i < old_size * 8; i++) {
+
+      ck_free(afl->indir_top_rated_candidates[i]);
+
+    }
+
+  }
+
+  afl->indir_virgin_bits = ck_realloc(afl->indir_virgin_bits, new_size);
+  afl->indir_var_bytes = ck_realloc(afl->indir_var_bytes, new_size);
+  afl->clean_trace_indir = ck_realloc(afl->clean_trace_indir, new_size);
+  afl->first_trace_indir = ck_realloc(afl->first_trace_indir, new_size);
+  afl->indir_map_tmp_buf = ck_realloc(afl->indir_map_tmp_buf, new_size);
+  afl->indir_site_saves =
+      ck_realloc(afl->indir_site_saves, new_slots * sizeof(u32));
+  afl->indir_top_rated = ck_realloc(
+      afl->indir_top_rated, new_size * 8 * sizeof(struct queue_entry *));
+  afl->indir_top_rated_candidates =
+      ck_realloc(afl->indir_top_rated_candidates, new_size * 8 * sizeof(u32 *));
+
+  if (new_size > old_size) {
+
+    u32 diff = new_size - old_size;
+    memset(afl->indir_virgin_bits + old_size, 255, diff);
+    memset(afl->indir_var_bytes + old_size, 0, diff);
+    memset(afl->clean_trace_indir + old_size, 0, diff);
+    memset(afl->first_trace_indir + old_size, 0, diff);
+    memset(afl->indir_map_tmp_buf + old_size, 0, diff);
+    memset(afl->indir_site_saves + old_slots, 0,
+           (new_slots - old_slots) * sizeof(u32));
+    memset(afl->indir_top_rated + old_size * 8, 0,
+           diff * 8 * sizeof(struct queue_entry *));
+    memset(afl->indir_top_rated_candidates + old_size * 8, 0,
+           diff * 8 * sizeof(u32 *));
+
+  }
+
+  memset(afl->indir_virgin_bits, 0, sizeof(indir_slot_t));
+  afl->indir_count_dirty = 1;
+
+  afl->shm.indir_map_size = new_size;
+  afl->fsrv.indir_map_size = new_size;
+  afl->fsrv.indir_map_alloc = new_size;
+
+}
+
 void afl_state_deinit(afl_state_t *afl) {
 
   // INDIR_CHANGE: indirect buffers are freed at the end of afl_state_deinit
@@ -983,16 +1040,12 @@ void afl_state_deinit(afl_state_t *afl) {
 
   ck_free(afl->indir_virgin_bits);
   afl->indir_virgin_bits = NULL;
-  ck_free(afl->indir_virgin_tmout);
-  afl->indir_virgin_tmout = NULL;
-  ck_free(afl->indir_virgin_crash);
-  afl->indir_virgin_crash = NULL;
   ck_free(afl->indir_var_bytes);
   afl->indir_var_bytes = NULL;
   ck_free(afl->clean_trace_indir);
   afl->clean_trace_indir = NULL;
-  ck_free(afl->baseline_trace_indir);
-  afl->baseline_trace_indir = NULL;
+  ck_free(afl->indir_site_saves);
+  afl->indir_site_saves = NULL;
   ck_free(afl->first_trace_indir);
   afl->first_trace_indir = NULL;
   ck_free(afl->indir_map_tmp_buf);

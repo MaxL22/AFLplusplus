@@ -496,6 +496,28 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 
   }
 
+  // INDIR_CHANGE: indirect coverage and how the queue entries kept only for
+  // it pay off. None of this shows up in edge-based coverage measurements.
+  if (afl->shm.indir_mode) {
+
+    u32 indir_var_count = 0;
+    for (u32 i = 0; i < afl->fsrv.indir_map_size; i++) {
+
+      indir_var_count += !!afl->indir_var_bytes[i];
+
+    }
+
+    fprintf(f,
+            "indir_bits_found  : %u\n"
+            "indir_var_bytes   : %u\n"
+            "corpus_indir_only : %u\n"
+            "indir_only_useful : %u\n"
+            "indir_edge_desc   : %u\n",
+            count_indir_bits(afl), indir_var_count, afl->queued_indir_only,
+            afl->indir_only_productive, afl->indir_edge_desc);
+
+  }
+
   /* ignore errors */
 
   if (afl->debug) {

@@ -194,6 +194,15 @@ fsrv_run_result_t fuzz_run_target(afl_state_t *afl, afl_forkserver_t *fsrv,
 
 }
 
+// INDIR_CHANGE: referenced by trim_case_custom(), afl-tmin has no indir map
+bool indir_trace_unchanged(afl_state_t *afl, struct queue_entry *q) {
+
+  (void)afl;
+  (void)q;
+  return true;
+
+}
+
 #ifndef USE_PYTHON
 struct custom_mutator *load_custom_mutator_py(afl_state_t *afl, char *module) {
 

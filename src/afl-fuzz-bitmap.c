@@ -157,6 +157,11 @@ u32 count_indir_bits(afl_state_t *afl) {
 
   }
 
+  // INDIR_CHANGE: called on every UI refresh and fuzz_one log line; the
+  // virgin map only changes through has_indir_new_bits_map() and calibration
+  if (!afl->indir_count_dirty) { return afl->indir_count_cache; }
+  afl->indir_count_dirty = 0;
+
   u32 *ptr = (u32 *)(afl->indir_virgin_bits + sizeof(indir_slot_t));
   u32  i = ((afl->fsrv.indir_map_size - sizeof(indir_slot_t)) >> 2);
   u32  ret = 0;
@@ -170,6 +175,7 @@ u32 count_indir_bits(afl_state_t *afl) {
 
   }
 
+  afl->indir_count_cache = ret;
   return ret;
 
 }
@@ -181,10 +187,16 @@ u32 count_indir_bits(afl_state_t *afl) {
 
 u32 count_indir_bits_run(afl_state_t *afl, u8 *mem) {
 
-  if (!afl->shm.indir_mode || !mem || !afl->fsrv.indir_map_size) { return 0; }
+  if (!afl->shm.indir_mode || !mem ||
+      afl->fsrv.indir_map_size <= sizeof(indir_slot_t)) {
 
-  u32 *ptr = (u32 *)mem;
-  u32  i = (afl->fsrv.indir_map_size >> 2);
+    return 0;
+
+  }
+
+  // INDIR_CHANGE: skip the slot-0 sink, like count_indir_bits()
+  u32 *ptr = (u32 *)(mem + sizeof(indir_slot_t));
+  u32  i = ((afl->fsrv.indir_map_size - sizeof(indir_slot_t)) >> 2);
   u32  ret = 0;
 
   while (i--) {
@@ -378,11 +390,8 @@ inline u8 check_indir_new_bits_map(afl_state_t *afl,
 // INDIR_CHANGE: returns 1 if new indirect coverage is found, 0 otherwise
 inline u8 has_indir_new_bits_map(afl_state_t *afl, u8 *indir_virgin_map) {
 
-  if (unlikely(afl->fsrv.indir_map_size % 8 != 0)) {
-
-    FATAL("indir_map_size must be a multiple of 8");
-
-  }
+  // INDIR_CHANGE: indir_map_size is always a multiple of 64 (forkserver hello
+  // and AFL_INDIR_MAP_SIZE are rounded up), no per-execution check needed
 
 #if defined(__AVX2__) && defined(WORD_SIZE_64)
   const u64 *end =
@@ -422,9 +431,109 @@ inline u8 has_indir_new_bits_map(afl_state_t *afl, u8 *indir_virgin_map) {
 
   }
 
-  if (unlikely(ret)) { afl->bitmap_changed = 1; }
+  if (unlikely(ret)) {
+
+    afl->bitmap_changed = 1;
+    afl->indir_count_dirty = 1;
+
+  }
 
   return ret;
+
+}
+
+// INDIR_CHANGE: checksum of the indirect trace. Bytes known to be variable
+// are cleared first (in fsrv.indir_bits too, they are masked in
+// indir_virgin_bits anyway), so that flaky pairs do not change the checksum.
+u64 hash_indir_trace(afl_state_t *afl) {
+
+  u8 *bits = afl->fsrv.indir_bits;
+  u8 *var = afl->indir_var_bytes;
+
+#ifdef WORD_SIZE_64
+  u64 *bits64 = (u64 *)bits, *var64 = (u64 *)var;
+  for (u32 i = 0; i < (afl->fsrv.indir_map_size >> 3); ++i) {
+
+    if (unlikely(var64[i] && bits64[i])) {
+
+      for (u32 j = i << 3; j < (i << 3) + 8; ++j) {
+
+        if (var[j]) { bits[j] = 0; }
+
+      }
+
+    }
+
+  }
+
+#else
+  for (u32 i = 0; i < afl->fsrv.indir_map_size; ++i) {
+
+    if (unlikely(var[i])) { bits[i] = 0; }
+
+  }
+
+#endif
+
+  return hash64(bits, afl->fsrv.indir_map_size, HASH_CONST);
+
+}
+
+/* INDIR_CHANGE: check the indirect trace for novelty and record it in
+   indir_virgin_bits when it counts. With edge novelty (new_bits != 0) new
+   indirect bits are simply recorded. Indirect-only novelty is a weaker signal:
+   it is only accepted when the edge path differs from the parent's (otherwise
+   the input just re-pairs code the parent already runs) and at least one
+   novel site is still below its cap of indirect-only saves. Rejected bits are
+   not recorded, so a later input that passes can still claim them. Returns 1
+   if new indirect bits were recorded. */
+
+static u8 indir_novelty(afl_state_t *afl, u8 new_bits, u64 cksum) {
+
+  if (likely(!check_indir_new_bits_map(afl, afl->indir_virgin_bits))) {
+
+    return 0;
+
+  }
+
+  if (new_bits) { return has_indir_new_bits_map(afl, afl->indir_virgin_bits); }
+
+  if (afl->queue_cur && !afl->syncing_party &&
+      afl->queue_cur->exec_cksum == cksum) {
+
+    return 0;
+
+  }
+
+  indir_slot_t *cur = (indir_slot_t *)afl->fsrv.indir_bits;
+  indir_slot_t *virgin = (indir_slot_t *)afl->indir_virgin_bits;
+  u32           slots = afl->fsrv.indir_map_size / sizeof(indir_slot_t);
+  u32           i;
+
+  if (afl->indir_max_per_site) {
+
+    for (i = 1; i < slots; ++i) {
+
+      if ((cur[i] & virgin[i]) &&
+          afl->indir_site_saves[i] < afl->indir_max_per_site) {
+
+        break;
+
+      }
+
+    }
+
+    if (i == slots) { return 0; }
+
+  }
+
+  for (i = 1; i < slots; ++i) {
+
+    if (cur[i] & virgin[i]) { ++afl->indir_site_saves[i]; }
+
+  }
+
+  return has_indir_new_bits_map(afl, afl->indir_virgin_bits);
 
 }
 
@@ -475,14 +584,6 @@ void minimize_bits(afl_state_t *afl, u8 *dst, u8 *src) {
     ++i;
 
   }
-
-}
-
-// INDIR_CHANGE: does the same thing as the one above, no need for minimizing
-// bits are already minimized by design
-void minimize_indir_bits(afl_state_t *afl, u8 *dst, u8 *src) {
-
-  memcpy(dst, src, afl->shm.indir_map_size);
 
 }
 
@@ -544,7 +645,8 @@ u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len) {
       ret[len_current++] = ',';
       ret[len_current] = '\0';
 
-      ssize_t size_left = real_max_len - len_current - strlen(",+cov") - 2;
+      // INDIR_CHANGE: ",+icov" is the longest coverage tag
+      ssize_t size_left = real_max_len - len_current - strlen(",+icov") - 2;
       if (is_timeout) { size_left -= strlen(",+tout"); }
       if (unlikely(size_left <= 0)) FATAL("filename got too long");
 
@@ -594,6 +696,9 @@ u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len) {
   if (is_timeout) { strcat(ret, ",+tout"); }
 
   if (new_bits == 2) { strcat(ret, ",+cov"); }
+
+  // INDIR_CHANGE: saved for indirect-only novelty
+  if (afl->indir_only_find) { strcat(ret, ",+icov"); }
 
   if (san_crash_only) { strcat(ret, ",+san"); }
 
@@ -709,6 +814,36 @@ static inline void calculate_new_bits_if_necessary(afl_state_t *afl,
 
 }
 
+// INDIR_CHANGE: n_fuzz bucket of the current execution, see indir_path_id()
+static inline u32 n_fuzz_path(afl_state_t *afl, u64 cksum) {
+
+  return indir_path_id(afl, cksum,
+                       afl->shm.indir_mode ? hash_indir_trace(afl) : 0);
+
+}
+
+/* INDIR_CHANGE: q found new edges. Credit its indirect-only ancestors, to
+   measure whether keeping indirect-only finds leads to new edge coverage. */
+
+static void indir_credit_ancestors(afl_state_t *afl, struct queue_entry *q) {
+
+  u8 credited = 0;
+
+  for (struct queue_entry *a = q->mother; a; a = a->mother) {
+
+    if (a->indir_only) {
+
+      if (!a->indir_edge_desc++) { ++afl->indir_only_productive; }
+      credited = 1;
+
+    }
+
+  }
+
+  afl->indir_edge_desc += credited;
+
+}
+
 /* Check if the result of an execve() during routine fuzzing is interesting,
    save or queue the input test case for further analysis if so. Returns 1 if
    entry is saved, 0 otherwise. */
@@ -726,8 +861,8 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
       u64 cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
 
       // Saturated increment
-      if (likely(afl->n_fuzz[cksum % N_FUZZ_SIZE] < 0xFFFFFFFF))
-        afl->n_fuzz[cksum % N_FUZZ_SIZE]++;
+      u32 path = n_fuzz_path(afl, cksum);  // INDIR_CHANGE
+      if (likely(afl->n_fuzz[path] < 0xFFFFFFFF)) afl->n_fuzz[path]++;
 
     }
 
@@ -746,7 +881,7 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
   u8   new_bits = 0;                       /* valid if bits_counted is true */
   u64  cksum = 0;                               /* valid if cksumed is true */
   // INDIR_CHANGE: indir bit count
-  bool indir_bits_counted = false;
+  bool indir_bits_counted = false, indir_only = false;
   u8   indir_new_bits = 0;
 
   afl->san_case_status = 0;
@@ -760,8 +895,8 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
     calculate_cksum_if_necessary(afl, &cksum, &cksumed, &classified);
 
     /* Saturated increment */
-    if (likely(afl->n_fuzz[cksum % N_FUZZ_SIZE] < 0xFFFFFFFF))
-      afl->n_fuzz[cksum % N_FUZZ_SIZE]++;
+    u32 path = n_fuzz_path(afl, cksum);  // INDIR_CHANGE
+    if (likely(afl->n_fuzz[path] < 0xFFFFFFFF)) afl->n_fuzz[path]++;
 
   }
 
@@ -794,16 +929,12 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
       /* Check if the input increase the coverage */
       calculate_new_bits_if_necessary(afl, &new_bits, &bits_counted,
                                       &classified);
-      // INDIR_CHANGE: kinda the same thing as the `if_necessary` above
-      // (could be a spearate function)
+      // INDIR_CHANGE: indirect novelty, see indir_novelty()
       if (afl->shm.indir_mode && !indir_bits_counted) {
 
         indir_bits_counted = true;
-        if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
-
-          indir_new_bits = 1;
-
-        }
+        calculate_cksum_if_necessary(afl, &cksum, &cksumed, &classified);
+        indir_new_bits = indir_novelty(afl, new_bits, cksum);
 
       }
 
@@ -878,27 +1009,27 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
        future fuzzing, etc. */
     calculate_new_bits_if_necessary(afl, &new_bits, &bits_counted, &classified);
 
-    // INDIR_CHANGE: treat indirect novelty as secondary hit-count feedback
-    // (new_bits = 1)
+    // INDIR_CHANGE: indirect-only novelty ranks like a hit-count change
+    // (new_bits = 1), here and in calibrate_case(); see indir_novelty()
     if (afl->shm.indir_mode) {
 
       if (!indir_bits_counted) {
 
         indir_bits_counted = true;
-        if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
-
-          indir_new_bits = 1;
-
-        }
+        calculate_cksum_if_necessary(afl, &cksum, &cksumed, &classified);
+        indir_new_bits = indir_novelty(afl, new_bits, cksum);
 
       }
 
-      if (indir_new_bits && new_bits == 0) { new_bits = 1; }
+      if (indir_new_bits && new_bits == 0) {
+
+        new_bits = 1;
+        indir_only = true;
+
+      }
 
     }
 
-    // INDIR_CHANGE: kinda the same thing as the `if_necessary` above
-    // (could be a spearate function)
     if (likely(!new_bits)) {
 
       if (san_fault == FSRV_RUN_OK) {
@@ -925,26 +1056,30 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
     calculate_cksum_if_necessary(afl, &cksum, &cksumed, &classified);
     calculate_new_bits_if_necessary(afl, &new_bits, &bits_counted, &classified);
 
-    // INDIR_CHANGE: treat indirect novelty as secondary hit-count feedback
-    // (new_bits = 1)
+    // INDIR_CHANGE: indirect-only novelty ranks like a hit-count change
+    // (new_bits = 1), here and in calibrate_case(); see indir_novelty()
     if (afl->shm.indir_mode) {
 
       if (!indir_bits_counted) {
 
         indir_bits_counted = true;
-        if (has_indir_new_bits_map(afl, afl->indir_virgin_bits)) {
-
-          indir_new_bits = 1;
-
-        }
+        calculate_cksum_if_necessary(afl, &cksum, &cksumed, &classified);
+        indir_new_bits = indir_novelty(afl, new_bits, cksum);
 
       }
 
-      if (indir_new_bits && new_bits == 0) { new_bits = 1; }
+      if (indir_new_bits && new_bits == 0) {
+
+        new_bits = 1;
+        indir_only = true;
+
+      }
 
     }
 
 #ifndef SIMPLE_FILES
+
+    afl->indir_only_find = indir_only;  // INDIR_CHANGE: for describe_op()
 
     if (!afl->afl_env.afl_sha1_filenames) {
 
@@ -983,11 +1118,8 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
     add_to_queue(afl, queue_fn, len, 0);
 
-    // INDIR_CHANGE: only major CFG edge discovery (new_bits == 2) kicks out of
-    // exploitation mode
     if (unlikely(afl->fuzz_mode) &&
-        likely(afl->switch_fuzz_mode && !afl->non_instrumented_mode) &&
-        new_bits == 2) {
+        likely(afl->switch_fuzz_mode && !afl->non_instrumented_mode)) {
 
       if (afl->afl_env.afl_no_ui) {
 
@@ -1030,6 +1162,27 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
     afl->queue_top->exec_cksum = cksum;
 
+    // INDIR_CHANGE: the indirect checksum must be known before calibration,
+    // or every calibration run looks unstable
+    if (afl->shm.indir_mode) {
+
+      afl->queue_top->indir_cksum = hash_indir_trace(afl);
+      afl->queue_top->indir_only = indir_only;
+
+      if (indir_only) {
+
+        ++afl->queued_indir_only;
+
+      } else if (new_bits == 2) {
+
+        indir_credit_ancestors(afl, afl->queue_top);
+
+      }
+
+    }
+
+    afl->indir_only_find = false;
+
     if (new_bits == 2) {
 
       afl->queue_top->has_new_cov = 1;
@@ -1040,8 +1193,16 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
     /* For AFLFast schedules we update the new queue entry */
     if (unlikely(afl->schedule >= FAST && afl->schedule <= RARE)) {
 
-      afl->queue_top->n_fuzz_entry = cksum % N_FUZZ_SIZE;
-      afl->n_fuzz[afl->queue_top->n_fuzz_entry] = 1;
+      // INDIR_CHANGE: the path id includes the indirect trace, so that an
+      // indirect-only find does not share (and reset) the counter of the
+      // entry whose edge path it has
+      afl->queue_top->n_fuzz_entry =
+          indir_path_id(afl, cksum, afl->queue_top->indir_cksum);
+      if (!afl->n_fuzz[afl->queue_top->n_fuzz_entry] || !afl->shm.indir_mode) {
+
+        afl->n_fuzz[afl->queue_top->n_fuzz_entry] = 1;
+
+      }
 
     }
 

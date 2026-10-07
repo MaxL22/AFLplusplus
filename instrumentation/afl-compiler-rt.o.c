@@ -469,6 +469,26 @@ static void __afl_map_shm_fuzz() {
 
 /* SHM setup. */
 
+// INDIR_CHANGE: the fuzzer's indirect SHM is smaller than this target needs.
+// Coverage then goes to the private dummy buffer, so say so instead of
+// silently reporting an empty map. The fuzzer resizes the SHM from the
+// forkserver hello, so this is only expected before that renegotiation.
+static void __afl_indir_too_small(u32 shm_size) {
+
+  __afl_indir_ptr = __afl_indir_ptr_dummy;
+
+  if (__afl_debug) {
+
+    fprintf(stderr,
+            "DEBUG: indirect map needs %u bytes but the fuzzer SHM has %u "
+            "bytes, indirect coverage is NOT recorded (set "
+            "AFL_INDIR_MAP_SIZE=%u)\n",
+            __afl_indir_map_size, shm_size, __afl_indir_map_size);
+
+  }
+
+}
+
 static void __afl_map_shm(void) {
 
   if (__afl_already_initialized_shm) return;
@@ -1020,7 +1040,8 @@ static void __afl_map_shm(void) {
 
     } else {
 
-      __afl_indir_ptr = __afl_indir_ptr_dummy;
+      munmap(shm_base, indir_shm_bytes);
+      __afl_indir_too_small(env_indir_val);
 
     }
 
@@ -1045,7 +1066,8 @@ static void __afl_map_shm(void) {
 
     } else {
 
-      __afl_indir_ptr = __afl_indir_ptr_dummy;
+      shmdt(shm_base);
+      __afl_indir_too_small(env_indir_val);
 
     }
 
@@ -1339,8 +1361,19 @@ static void __afl_start_forkserver(void) {
 
     }
 
-    // INDIR_CHANGE: add indir flag
-    if (__afl_indir_final_loc > 0) { status |= FS_NEW_OPT_INDIR_MAPSIZE; }
+    // INDIR_CHANGE: add indir flag. Only report the indirect map to a fuzzer
+    // that set one up, so that indirect-instrumented binaries still work with
+    // stock afl-fuzz (and with this fork without AFL_LLVM_INDIRECT), which do
+    // not expect the extra hello field.
+    u8 indir_report = __afl_indir_final_loc > 0 && getenv(INDIR_SHM_ENV_VAR);
+    if (indir_report) { status |= FS_NEW_OPT_INDIR_MAPSIZE; }
+
+    if (__afl_debug) {
+
+      fprintf(stderr, "DEBUG: %u indirect sites, indirect map %sreported\n",
+              __afl_indir_final_loc, indir_report ? "" : "NOT ");
+
+    }
 
     /* Add IJON capability flag if IJON is enabled */
     if (__afl_ijon_enabled) { status |= FS_OPT_IJON; }
@@ -1359,7 +1392,7 @@ static void __afl_start_forkserver(void) {
     if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
 
     // INDIR_CHANGE: send indir map size in bytes to fsrv fd
-    if (__afl_indir_final_loc > 0) {
+    if (indir_report) {
 
       u32 indir_sz = __afl_indir_map_size;
       if (write(FORKSRV_FD + 1, &indir_sz, 4) != 4) { _exit(1); }
@@ -2546,11 +2579,11 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 }
 
 // INDIR_CHANGE: added __afl_indir_trace_pc_guard_init
+// Slot 0 is the sink for sites without a usable guard, so real sites are
+// numbered from 1 and __afl_indir_final_loc is the highest guard in use.
 void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 
   if (start == stop || *start) return;
-
-  if (__afl_indir_final_loc < 1) __afl_indir_final_loc = 1;
 
   if (__afl_already_initialized_forkserver) {
 
@@ -2561,38 +2594,22 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 
     }
 
-    // INDIR_CHANGE: Check if user explicitly requested to ignore coverage from
-    // the DSO
-    u8 ignore_dso_after_fs = !!getenv("AFL_IGNORE_PROBLEMS_COVERAGE");
+    // INDIR_CHANGE: the map cannot grow once the forkserver is up. Sites of a
+    // late DSO would otherwise share slots with unrelated sites of the main
+    // binary and add noise to their signal, so they all go to the slot-0 sink
+    // that the fuzzer ignores.
+    if (__afl_debug) {
 
-    // INDIR_CHANGE: Fix OOB when __afl_indir_final_loc <= 1 and allow using
-    // last slot.
-    if (__afl_indir_final_loc <= 1) {
-
-      while (start < stop) {
-
-        *(start++) = 0;
-
-      }
-
-      return;
+      fprintf(stderr,
+              "DEBUG: %u indirect sites of a DSO loaded after the forkserver "
+              "started are not tracked\n",
+              (u32)(stop - start));
 
     }
 
-    static u32 offset = 2;
     while (start < stop) {
 
-      // INDIR_CHANGE: ignore coverage from DSO
-      if (!ignore_dso_after_fs) {
-
-        *(start++) = offset;
-        if (++offset > __afl_indir_final_loc) offset = 2;
-
-      } else {
-
-        *(start++) = 0;
-
-      }
+      *(start++) = 0;
 
     }
 
@@ -2630,18 +2647,28 @@ void __afl_indir_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 
     }
 
+  } else if (needed_indir_bytes > sizeof(__afl_indir_initial) &&
+
+             __afl_indir_ptr == __afl_indir_initial) {
+
+    // INDIR_CHANGE: sites may run in constructors before the SHM is attached;
+    // make sure the pre-SHM buffer covers every guard handed out so far.
+    u8 *buf = (u8 *)calloc(1, needed_indir_bytes);
+    if (!buf) {
+
+      fprintf(stderr,
+              "Error: AFL++ could not acquire %u bytes of memory for indir "
+              "map, exiting!\n",
+              needed_indir_bytes);
+      exit(-1);
+
+    }
+
+    __afl_indir_ptr = __afl_indir_ptr_dummy = buf;
+
   }
 
-  // INDIR_CHANGE: set exact needed map size before forkserver, grow for DSOs
-  if (!__afl_already_initialized_forkserver) {
-
-    __afl_indir_map_size = needed_indir_bytes;
-
-  } else if (needed_indir_bytes > __afl_indir_map_size) {
-
-    __afl_indir_map_size = needed_indir_bytes;
-
-  }
+  __afl_indir_map_size = needed_indir_bytes;
 
 }
 
@@ -3976,27 +4003,19 @@ uint32_t ijon_memdist(char *a, char *b, size_t len) {
 
 }
 
-// INDIR_CHANGE: trace indir fallback callback with relative displacement &
-// atomic OR
+// INDIR_CHANGE: trace indir fallback callback, same hash as the inlined
+// instrumentation in SanitizerCoveragePCGUARD.so.cc. Only the page offset of
+// the target is hashed: it is the part of an address that ASLR never changes,
+// so targets in other DSOs get the same bit in every forkserver session.
 void __afl_trace_indir(uint32_t *guard, uintptr_t target_addr) {
-
-  if (unlikely(!__afl_indir_ptr || __afl_indir_ptr == __afl_indir_ptr_dummy))
-    return;
 
   if (unlikely(!(*guard))) return;
 
-  // INDIR_CHANGE: relative displacement calculation
-  uintptr_t caller_pc = (uintptr_t)__builtin_return_address(0);
-  uintptr_t displacement = target_addr - caller_pc;
+  u32 key = (u32)(target_addr & INDIR_TARGET_KEY_MASK);
+  u32 bit_idx = (key * INDIR_TARGET_HASH_MUL) >> (32 - INDIR_BIT_SHIFT);
 
   indir_slot_t *indir_map_slots = (indir_slot_t *)__afl_indir_ptr;
-  // Multiplicative hash on relative displacement
-  uint8_t bit_idx =
-      (uint8_t)((((uint64_t)displacement) * 0x9E3779B97F4A7C15ULL) >>
-                (64 - INDIR_BIT_SHIFT));
-
-  indir_slot_t mask = (indir_slot_t)1 << bit_idx;
-  __atomic_fetch_or(&indir_map_slots[*guard], mask, __ATOMIC_RELAXED);
+  indir_map_slots[*guard] |= (indir_slot_t)1 << bit_idx;
 
 }
 

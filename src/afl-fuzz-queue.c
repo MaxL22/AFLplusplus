@@ -465,14 +465,6 @@ void mark_as_redundant(afl_state_t *afl, struct queue_entry *q, u8 state) {
 
     }
 
-    // INDIR_CHANGE: idk, it does the same thing above
-    if (unlikely(q->trace_mini_indir)) {
-
-      ck_free(q->trace_mini_indir);
-      q->trace_mini_indir = NULL;
-
-    }
-
   }
 
   if (state) {
@@ -788,7 +780,7 @@ void destroy_queue(afl_state_t *afl) {
     ck_free(q->fname);
     ck_free(q->trace_mini);
     // INDIR_CHANGE: If we need to destroy, we need to destroy EVERYTHING
-    ck_free(q->trace_mini_indir);
+    ck_free(q->indir_trace);
     if (q->skipdet_e) {
 
       if (q->skipdet_e->done_inf_map) ck_free(q->skipdet_e->done_inf_map);
@@ -812,6 +804,153 @@ void destroy_queue(afl_state_t *afl) {
     }
 
     ck_free(q);
+
+  }
+
+}
+
+/* INDIR_CHANGE: winner criteria shared by the edge and the indirect
+   top_rated lists (smaller fuzz_p2 first, then smaller fav_factor). */
+
+static inline u64 score_fuzz_p2(afl_state_t *afl, struct queue_entry *q) {
+
+  if (unlikely(afl->schedule >= FAST && afl->schedule < RARE)) { return 0; }
+  if (unlikely(afl->schedule == RARE)) {
+
+    return next_pow2(afl->n_fuzz[q->n_fuzz_entry]);
+
+  }
+
+  return q->fuzz_level;
+
+}
+
+static inline u64 score_fav_factor(afl_state_t *afl, struct queue_entry *q) {
+
+  if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
+
+    return q->len << 2;
+
+  }
+
+  return q->exec_us * q->len;
+
+}
+
+/* INDIR_CHANGE: 64-bit word w of an indirect trace, with the slot-0 sink
+   cleared. Bit b of word w is indirect bit (w << 6) + b; indir_top_rated[]
+   and every loop over indirect bits use this numbering. */
+
+static inline u64 indir_trace_word(const u8 *trace, u32 w) {
+
+  u64 v;
+  memcpy(&v, trace + (w << 3), sizeof(v));
+
+  if (unlikely((w << 3) < sizeof(indir_slot_t))) {
+
+    memset(&v, 0, MIN(sizeof(indir_slot_t) - (w << 3), sizeof(v)));
+
+  }
+
+  return v;
+
+}
+
+/* INDIR_CHANGE: make q the winner of indirect bit i if it beats the current
+   one. Unlike trace_mini, every entry keeps its indirect trace (it is small,
+   see indir_trace_store()), so nothing is copied or freed here. */
+
+static void indir_try_win(afl_state_t *afl, struct queue_entry *q, u32 i,
+                          u64 fuzz_p2, u64 fav_factor) {
+
+  struct queue_entry *top = afl->indir_top_rated[i];
+
+  if (top) {
+
+    if (top == q) { return; }
+    if (likely(fuzz_p2 > score_fuzz_p2(afl, top))) { return; }
+    if (likely(fav_factor > score_fav_factor(afl, top))) { return; }
+
+    --top->tc_ref_indir;
+
+  }
+
+  afl->indir_top_rated[i] = q;
+  ++q->tc_ref_indir;
+
+  afl->score_changed = 1;
+
+}
+
+/* INDIR_CHANGE: keep a sparse copy of the current indirect trace (from
+   fsrv.indir_bits) in q->indir_trace: the number n of non-zero 64-bit words,
+   then n (word index, word) pairs, slot-0 sink excluded. A trace usually
+   touches few sites, so this is much smaller than the map, and it lets
+   cull_queue() know the indirect coverage of every entry. */
+
+void indir_trace_store(afl_state_t *afl, struct queue_entry *q) {
+
+  u32 words = afl->fsrv.indir_map_size >> 3, n = 0, w;
+
+  for (w = 0; w < words; ++w) {
+
+    n += !!indir_trace_word(afl->fsrv.indir_bits, w);
+
+  }
+
+  q->indir_trace = ck_realloc(q->indir_trace, (1 + 2 * n) * sizeof(u64));
+  q->indir_trace[0] = n;
+  n = 0;
+
+  for (w = 0; w < words; ++w) {
+
+    u64 v = indir_trace_word(afl->fsrv.indir_bits, w);
+    if (v) {
+
+      q->indir_trace[1 + 2 * n] = w;
+      q->indir_trace[2 + 2 * n] = v;
+      ++n;
+
+    }
+
+  }
+
+}
+
+/* INDIR_CHANGE: indir_top_rated[] counterpart of the edge loop in
+   update_bitmap_score(), over q's stored indirect trace. */
+
+void update_indir_score(afl_state_t *afl, struct queue_entry *q) {
+
+  if (unlikely(q->disabled || !q->indir_trace)) { return; }
+
+  u64 fuzz_p2 = score_fuzz_p2(afl, q);
+  u64 fav_factor = score_fav_factor(afl, q);
+
+  for (u64 k = 0; k < q->indir_trace[0]; ++k) {
+
+    u32 w = q->indir_trace[1 + 2 * k];
+    u64 v = q->indir_trace[2 + 2 * k];
+
+    while (v) {
+
+      u32 b = __builtin_ctzll(v);
+      v &= v - 1;
+      indir_try_win(afl, q, (w << 6) + b, fuzz_p2, fav_factor);
+
+    }
+
+  }
+
+}
+
+/* INDIR_CHANGE: temp &= ~(q's indirect trace) */
+
+static inline void indir_trace_clear(u64 *temp, struct queue_entry *q) {
+
+  for (u64 k = 0; k < q->indir_trace[0]; ++k) {
+
+    temp[q->indir_trace[1 + 2 * k]] &= ~q->indir_trace[2 + 2 * k];
 
   }
 
@@ -937,90 +1076,63 @@ void update_bitmap_score(afl_state_t *afl, struct queue_entry *q,
 
     }
 
-    // INDIR_CHANGE: this is kinda big, this updates the scored based on the
-    // indir map
-    // INDIR_CHANGE: evaluate indirect candidates starting from slot 1 with
-    // matched scoring formula
+    // INDIR_CHANGE: same for the indirect map
     if (afl->shm.indir_mode && afl->fsrv.indir_bits && afl->indir_top_rated) {
 
-      u64 fav_factor_indir = (q->exec_us * q->len) / MAX(1U, q->bitmap_size);
-      if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
-
-        fav_factor_indir = (q->len << 2) / MAX(1U, q->bitmap_size);
-
-      }
-
-      for (i = sizeof(indir_slot_t) * 8; i < afl->shm.indir_map_size * 8; ++i) {
-
-        if (afl->fsrv.indir_bits[i >> 3] & (1 << (i & 7))) {
-
-          if (afl->indir_top_rated[i]) {
-
-            u64 top_rated_fav_factor;
-            u64 top_rated_fuzz_p2;
-
-            if (unlikely(afl->schedule >= FAST && afl->schedule < RARE)) {
-
-              top_rated_fuzz_p2 = 0;
-
-            } else if (unlikely(afl->schedule == RARE)) {
-
-              top_rated_fuzz_p2 =
-                  next_pow2(afl->n_fuzz[afl->indir_top_rated[i]->n_fuzz_entry]);
-
-            } else {
-
-              top_rated_fuzz_p2 = afl->indir_top_rated[i]->fuzz_level;
-
-            }
-
-            if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
-
-              top_rated_fav_factor =
-                  (afl->indir_top_rated[i]->len << 2) /
-                  MAX(1U, afl->indir_top_rated[i]->bitmap_size);
-
-            } else {
-
-              top_rated_fav_factor =
-                  (afl->indir_top_rated[i]->exec_us *
-                   afl->indir_top_rated[i]->len) /
-                  MAX(1U, afl->indir_top_rated[i]->bitmap_size);
-
-            }
-
-            if (likely(fuzz_p2 > top_rated_fuzz_p2)) { continue; }
-            if (likely(fav_factor_indir > top_rated_fav_factor)) { continue; }
-
-            if (!--afl->indir_top_rated[i]->tc_ref_indir) {
-
-              ck_free(afl->indir_top_rated[i]->trace_mini_indir);
-              afl->indir_top_rated[i]->trace_mini_indir = NULL;
-
-            }
-
-          }
-
-          afl->indir_top_rated[i] = q;
-          ++q->tc_ref_indir;
-
-          if (!q->trace_mini_indir) {
-
-            u32 indir_len = afl->shm.indir_map_size;
-            q->trace_mini_indir = (u8 *)ck_alloc(indir_len);
-            minimize_indir_bits(afl, q->trace_mini_indir, afl->fsrv.indir_bits);
-
-          }
-
-          afl->score_changed = 1;
-
-        }
-
-      }
+      indir_trace_store(afl, q);
+      update_indir_score(afl, q);
 
     }
 
   }
+
+}
+
+// INDIR_CHANGE: helpers for the indirect pass of cull_queue()
+static int cmp_u64(const void *a, const void *b) {
+
+  u64 x = *(const u64 *)a, y = *(const u64 *)b;
+  return (x > y) - (x < y);
+
+}
+
+struct indir_cand {
+
+  struct queue_entry *q;
+  u32                 gain;
+
+};
+
+static int cmp_indir_cand_q(const void *a, const void *b) {
+
+  uintptr_t x = (uintptr_t)((const struct indir_cand *)a)->q;
+  uintptr_t y = (uintptr_t)((const struct indir_cand *)b)->q;
+  return (x > y) - (x < y);
+
+}
+
+// most uncovered bits first, then the older entry
+static int cmp_indir_cand_gain(const void *a, const void *b) {
+
+  const struct indir_cand *x = a, *y = b;
+  if (x->gain != y->gain) { return x->gain < y->gain ? 1 : -1; }
+  return (x->q->id > y->q->id) - (x->q->id < y->q->id);
+
+}
+
+// number of q's indirect bits still set in temp
+static u32 indir_trace_gain(const u64 *temp, struct queue_entry *q) {
+
+  u32 gain = 0;
+
+  for (u64 k = 0; k < q->indir_trace[0]; ++k) {
+
+    gain += __builtin_popcountll(temp[q->indir_trace[1 + 2 * k]] &
+                                 q->indir_trace[2 + 2 * k]);
+
+  }
+
+  return gain;
 
 }
 
@@ -1098,60 +1210,132 @@ void cull_queue(afl_state_t *afl) {
 
   }
 
-  // INDIR_CHANGE: reuse static scratch buffer and skip slot 0
+  // INDIR_CHANGE: second pass for indirect bits that no favorite covers yet.
+  // Bits of the entries the edge pass favored count as covered. A winner is
+  // only added when its edge path differs from every favorite (an entry that
+  // merely re-pairs a favorite's code is not worth a slot in the favored
+  // walk), the ones covering most uncovered bits first, and at most
+  // INDIR_FAV_MAX_PERCENT % of the edge favorites, so that indirect coverage
+  // cannot dilute the favored set.
   if (afl->shm.indir_mode && afl->indir_top_rated && afl->indir_map_tmp_buf) {
 
-    u32 indir_len = afl->shm.indir_map_size;
-    u8 *temp_v_indir = afl->indir_map_tmp_buf;
-    memset(temp_v_indir, 255, indir_len);
-    memset(temp_v_indir, 0, sizeof(indir_slot_t));  // mask slot 0 sink
+    u32  words = afl->fsrv.indir_map_size >> 3;
+    u64 *temp_v_indir = (u64 *)afl->indir_map_tmp_buf;
+    u32  edge_favored = afl->queued_favored;
+    u32  cap = MAX(1U, edge_favored * INDIR_FAV_MAX_PERCENT / 100);
+    u64 *fav_cksums = ck_alloc((edge_favored + cap + 1) * sizeof(u64));
+    u32  fav_cnt = 0, cand_cnt = 0, added = 0, w;
+    struct indir_cand *cands = NULL;
 
-    for (i = sizeof(indir_slot_t) * 8; i < afl->shm.indir_map_size * 8; ++i) {
+    memset(temp_v_indir, 255, words << 3);
 
-      if (afl->indir_top_rated[i] && (temp_v_indir[i >> 3] & (1 << (i & 7))) &&
-          afl->indir_top_rated[i]->trace_mini_indir) {
+    for (i = 0; i < afl->queued_items; i++) {
 
-        // Gate favored status on minimum edge coverage threshold
-        if (afl->indir_top_rated[i]->bitmap_size < MIN_EDGE_FOR_INDIR_FAV) {
+      struct queue_entry *q = afl->queue_buf[i];
+      if (!q->favored) { continue; }
+
+      fav_cksums[fav_cnt++] = q->exec_cksum;
+      if (q->indir_trace) { indir_trace_clear(temp_v_indir, q); }
+
+    }
+
+    qsort(fav_cksums, fav_cnt, sizeof(u64), cmp_u64);
+
+    // candidates: winners of still uncovered bits
+    u32 uncovered = 0;
+    for (w = 0; w < words; ++w) {
+
+      uncovered += __builtin_popcountll(indir_trace_word((u8 *)temp_v_indir, w));
+
+    }
+
+    if (uncovered) { cands = ck_alloc(uncovered * sizeof(*cands)); }
+
+    for (w = 0; w < words && uncovered; ++w) {
+
+      u64 v = indir_trace_word((u8 *)temp_v_indir, w);
+
+      while (v) {
+
+        u32 b = __builtin_ctzll(v);
+        v &= v - 1;
+
+        struct queue_entry *top = afl->indir_top_rated[(w << 6) + b];
+        if (!top || !top->indir_trace || top->favored || top->disabled) {
 
           continue;
 
         }
 
-        u32 j = indir_len;
-        while (j--) {
+        cands[cand_cnt].q = top;
+        cands[cand_cnt++].gain = 0;
 
-          if (afl->indir_top_rated[i]->trace_mini_indir[j]) {
+      }
 
-            temp_v_indir[j] &= ~afl->indir_top_rated[i]->trace_mini_indir[j];
+    }
 
-          }
+    if (cand_cnt) {
 
-        }
+      qsort(cands, cand_cnt, sizeof(*cands), cmp_indir_cand_q);
+      u32 uniq = 0;
+      for (u32 k = 0; k < cand_cnt; ++k) {
 
-        if (!afl->indir_top_rated[i]->favored &&
-            !afl->indir_top_rated[i]->disabled) {
+        if (uniq && cands[uniq - 1].q == cands[k].q) { continue; }
+        cands[uniq] = cands[k];
+        cands[uniq++].gain = indir_trace_gain(temp_v_indir, cands[k].q);
 
-          afl->indir_top_rated[i]->favored = 1;
-          ++afl->queued_favored;
-          if (!afl->indir_top_rated[i]->was_fuzzed) {
+      }
 
-            ++afl->pending_favored;
-            if (unlikely(afl->smallest_favored < 0 ||
-                         afl->smallest_favored >
-                             (s64)afl->indir_top_rated[i]->id)) {
+      cand_cnt = uniq;
+      qsort(cands, cand_cnt, sizeof(*cands), cmp_indir_cand_gain);
 
-              afl->smallest_favored = (s64)afl->indir_top_rated[i]->id;
+    }
 
-            }
+    for (u32 k = 0; k < cand_cnt && added < cap; ++k) {
 
-          }
+      struct queue_entry *top = cands[k].q;
+
+      if (!indir_trace_gain(temp_v_indir, top) ||
+          bsearch(&top->exec_cksum, fav_cksums, fav_cnt, sizeof(u64),
+                  cmp_u64)) {
+
+        continue;
+
+      }
+
+      indir_trace_clear(temp_v_indir, top);
+
+      top->favored = 1;
+      ++afl->queued_favored;
+      ++added;
+
+      // keep fav_cksums sorted for bsearch()
+      u32 pos = fav_cnt++;
+      while (pos && fav_cksums[pos - 1] > top->exec_cksum) {
+
+        fav_cksums[pos] = fav_cksums[pos - 1];
+        --pos;
+
+      }
+
+      fav_cksums[pos] = top->exec_cksum;
+
+      if (!top->was_fuzzed) {
+
+        ++afl->pending_favored;
+        if (unlikely(afl->smallest_favored < 0 ||
+                     afl->smallest_favored > (s64)top->id)) {
+
+          afl->smallest_favored = (s64)top->id;
 
         }
 
       }
 
     }
+
+    ck_free(cands);
+    ck_free(fav_cksums);
 
   }
 
@@ -1223,13 +1407,18 @@ void recalculate_all_scores(afl_state_t *afl) {
 
       }
 
-      // INDIR_CHANGE: again, as above
+      // INDIR_CHANGE: again, as above (bit numbering of indir_trace_word())
       if (afl->shm.indir_mode && afl->fsrv.indir_bits &&
           afl->indir_top_rated_candidates) {
 
-        for (j = 0; j < afl->shm.indir_map_size * 8; ++j) {
+        for (u32 w = 0; w < (afl->fsrv.indir_map_size >> 3); ++w) {
 
-          if (afl->fsrv.indir_bits[j >> 3] & (1 << (j & 7))) {
+          u64 v = indir_trace_word(afl->fsrv.indir_bits, w);
+
+          while (v) {
+
+            j = (w << 6) + __builtin_ctzll(v);
+            v &= v - 1;
 
             u32 *candidate_ids = afl->indir_top_rated_candidates[j];
             u32  id = afl->queue_buf[i]->id;
@@ -1411,106 +1600,18 @@ void update_bitmap_rescore(afl_state_t *afl, struct queue_entry *q, u32 index) {
 
 }
 
-// INDIR_CHANGE: indir copy of the function above
+/* INDIR_CHANGE: indirect counterpart of the function above. Every entry keeps
+   its own indirect trace from calibration, so unlike trace_mini nothing is
+   taken from fsrv.indir_bits, which holds the trace of whichever entry ran
+   last. */
+
 void update_bitmap_indir_rescore(afl_state_t *afl, struct queue_entry *q,
                                  u32 index) {
-
-  u32 i = index;
-  u64 fav_factor;
-  u64 fuzz_p2;
 
   // INDIR_CHANGE: ignore disabled entries and dummy slot 0 sink
   if (unlikely(q->disabled || index < sizeof(indir_slot_t) * 8)) { return; }
 
-  if (unlikely(afl->schedule >= FAST && afl->schedule < RARE)) {
-
-    fuzz_p2 = 0;  // Skip the fuzz_p2 comparison
-
-  } else if (unlikely(afl->schedule == RARE)) {
-
-    fuzz_p2 = next_pow2(afl->n_fuzz[q->n_fuzz_entry]);
-
-  } else {
-
-    fuzz_p2 = q->fuzz_level;
-
-  }
-
-  // INDIR_CHANGE: matched indirect candidate scoring formula
-  if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
-
-    fav_factor = (q->len << 2) / MAX(1U, q->bitmap_size);
-
-  } else {
-
-    fav_factor = (q->exec_us * q->len) / MAX(1U, q->bitmap_size);
-
-  }
-
-  if (afl->indir_top_rated[i]) {
-
-    /* Faster-executing or smaller test cases are favored. */
-    u64 top_rated_fav_factor;
-    u64 top_rated_fuzz_p2;
-
-    if (unlikely(afl->schedule >= FAST && afl->schedule < RARE)) {
-
-      top_rated_fuzz_p2 = 0;  // Skip the fuzz_p2 comparison
-
-    } else if (unlikely(afl->schedule == RARE)) {
-
-      top_rated_fuzz_p2 =
-          next_pow2(afl->n_fuzz[afl->indir_top_rated[i]->n_fuzz_entry]);
-
-    } else {
-
-      top_rated_fuzz_p2 = afl->indir_top_rated[i]->fuzz_level;
-
-    }
-
-    // INDIR_CHANGE: matched indirect candidate scoring formula for top_rated
-    if (unlikely(afl->schedule >= RARE) || unlikely(afl->fixed_seed)) {
-
-      top_rated_fav_factor = (afl->indir_top_rated[i]->len << 2) /
-                             MAX(1U, afl->indir_top_rated[i]->bitmap_size);
-
-    } else {
-
-      top_rated_fav_factor =
-          (afl->indir_top_rated[i]->exec_us * afl->indir_top_rated[i]->len) /
-          MAX(1U, afl->indir_top_rated[i]->bitmap_size);
-
-    }
-
-    if (likely(fuzz_p2 > top_rated_fuzz_p2)) { return; }
-
-    if (likely(fav_factor > top_rated_fav_factor)) { return; }
-
-    if (!--afl->indir_top_rated[i]->tc_ref_indir) {
-
-      ck_free(afl->indir_top_rated[i]->trace_mini_indir);
-      afl->indir_top_rated[i]->trace_mini_indir = NULL;
-
-    }
-
-  }
-
-  /* Insert ourselves as the new winner. */
-
-  afl->indir_top_rated[i] = q;
-  ++q->tc_ref_indir;
-
-  if (!q->trace_mini_indir) {
-
-    // INDIR_CHANGE: zero-overhead mini trace allocation without target
-    // execution
-    u32 len = afl->shm.indir_map_size;
-    q->trace_mini_indir = (u8 *)ck_alloc(len);
-    minimize_indir_bits(afl, q->trace_mini_indir, afl->fsrv.indir_bits);
-
-  }
-
-  afl->score_changed = 1;
+  indir_try_win(afl, q, index, score_fuzz_p2(afl, q), score_fav_factor(afl, q));
 
 }
 
@@ -1606,40 +1707,24 @@ u32 calculate_score(afl_state_t *afl, struct queue_entry *q) {
 
   }
 
-  // We now have a *new* multiplier, if higher, set std multiplier to indir one
-  if (afl->shm.indir_mode && afl->shm.indir_map_size) {
+  // INDIR_CHANGE: the edge multiplier above is kept as is. Above-average
+  // indirect coverage only adds a small bounded bonus; entries that run few or
+  // no indirect sites are not penalized. Double arithmetic avoids the average
+  // truncating to 0 when indirect sites are sparse.
+  if (afl->shm.indir_mode && afl->total_indir_bitmap_size) {
 
-    u32 avg_indir_bitmap_size = afl->total_indir_bitmap_size / bitmap_entries;
-    double indir_multiplier = 1.0;
+    double avg_indir_bitmap_size =
+        (double)afl->total_indir_bitmap_size / bitmap_entries;
 
-    if (q->indir_bitmap_size * 0.3 > avg_indir_bitmap_size) {
+    if (q->indir_bitmap_size * 0.5 > avg_indir_bitmap_size) {
 
-      indir_multiplier = 3.0;
-
-    } else if (q->indir_bitmap_size * 0.5 > avg_indir_bitmap_size) {
-
-      indir_multiplier = 2.0;
+      multiplier *= 1.25;
 
     } else if (q->indir_bitmap_size * 0.75 > avg_indir_bitmap_size) {
 
-      indir_multiplier = 1.5;
-
-    } else if (q->indir_bitmap_size * 3 < avg_indir_bitmap_size) {
-
-      indir_multiplier = 0.25;
-
-    } else if (q->indir_bitmap_size * 2 < avg_indir_bitmap_size) {
-
-      indir_multiplier = 0.5;
-
-    } else if (q->indir_bitmap_size * 1.5 < avg_indir_bitmap_size) {
-
-      indir_multiplier = 0.75;
+      multiplier *= 1.1;
 
     }
-
-    // INDIR_CHANGE: harmonized geometric power schedule scaling
-    multiplier = sqrt(multiplier * indir_multiplier);
 
   }
 

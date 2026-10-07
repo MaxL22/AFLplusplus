@@ -2440,6 +2440,19 @@ int main(int argc, char **argv_orig, char **envp) {
 
   write_setup_file(afl, argc, argv);
 
+  // INDIR_CHANGE: default to 0; enable strictly on environment variable.
+  // Must be known before the fast resume version check below.
+  if (getenv("AFL_LLVM_INDIRECT")) {
+
+    afl->shm.indir_mode = 1;
+    OKF("Indirect jumps tracking enabled");
+
+  } else {
+
+    afl->shm.indir_mode = 0;
+
+  }
+
   if (afl->in_place_resume && !afl->afl_env.afl_no_fastresume) {
 
     u64 target_hash = 0;
@@ -2487,8 +2500,11 @@ int main(int argc, char **argv_orig, char **envp) {
         u64 *ver = (u64 *)ver_string;
         /* Try both version calculations to handle IJON/non-IJON compatibility
          */
+        // INDIR_CHANGE: files written with and without the indirect map have
+        // different layouts
         u64 expect_ver_no_ijon = FAST_RESUME_VERSION + afl->shm.cmplog_mode +
-                                 (sizeof(struct queue_entry) << 1);
+                                 (sizeof(struct queue_entry) << 1) +
+                                 ((u64)!!afl->shm.indir_mode << 32);
         u64 expect_ver_with_ijon =
             expect_ver_no_ijon + sizeof(u32) + sizeof(ijon_fastresume_state_t);
 
@@ -2616,7 +2632,14 @@ int main(int argc, char **argv_orig, char **envp) {
     if (!afl->fsrv.qemu_mode && !afl->fsrv.frida_mode && !afl->fsrv.cs_mode &&
         !afl->non_instrumented_mode && !afl->unicorn_mode) {
 
+      // INDIR_CHANGE: check_binary() sets fsrv.target_path. Keep the main
+      // target's: otherwise the main forkserver runs the cmplog binary, and
+      // its (indirect) coverage replaces the main binary's.
+      // cmplog_exec_child() switches to the cmplog binary by itself.
+      u8 *main_target_path = ck_strdup(afl->fsrv.target_path);
       check_binary(afl, afl->cmplog_binary);
+      ck_free(afl->fsrv.target_path);
+      afl->fsrv.target_path = main_target_path;
 
     }
 
@@ -2679,18 +2702,6 @@ int main(int argc, char **argv_orig, char **envp) {
 
   afl->argv = use_argv;
 
-  // INDIR_CHANGE: default to 0; enable strictly on environment variable
-  if (getenv("AFL_LLVM_INDIRECT")) {
-
-    afl->shm.indir_mode = 1;
-    OKF("Indirect jumps tracking enabled");
-
-  } else {
-
-    afl->shm.indir_mode = 0;
-
-  }
-
   // INDIR_CHANGE: Setup dummy size and env var
   if (afl->shm.indir_mode) {
 
@@ -2725,29 +2736,14 @@ int main(int argc, char **argv_orig, char **envp) {
   // INDIR_CHANGE: Dynamic allocation of indirect fuzzer buffers
   if (afl->shm.indir_mode) {
 
-    afl->indir_virgin_bits = (u8 *)ck_alloc(afl->shm.indir_map_size);
-    memset(afl->indir_virgin_bits, 255, afl->shm.indir_map_size);
-    // Ensure slot 0 is permanently isolated as an ignored dummy sink
-    memset(afl->indir_virgin_bits, 0, sizeof(indir_slot_t));
+    afl_indir_resize_buffers(afl, 0, afl->shm.indir_map_size);
 
-    afl->indir_virgin_tmout = (u8 *)ck_alloc(afl->shm.indir_map_size);
-    memset(afl->indir_virgin_tmout, 255, afl->shm.indir_map_size);
+    afl->indir_max_per_site = INDIR_ONLY_MAX_PER_SITE;
+    if (getenv("AFL_INDIR_MAX_PER_SITE")) {
 
-    afl->indir_virgin_crash = (u8 *)ck_alloc(afl->shm.indir_map_size);
-    memset(afl->indir_virgin_crash, 255, afl->shm.indir_map_size);
+      afl->indir_max_per_site = atoi(getenv("AFL_INDIR_MAX_PER_SITE"));
 
-    afl->indir_var_bytes = (u8 *)ck_alloc(afl->shm.indir_map_size);
-    afl->clean_trace_indir = (u8 *)ck_alloc(afl->shm.indir_map_size);
-    afl->baseline_trace_indir = (u8 *)ck_alloc(afl->shm.indir_map_size);
-    afl->first_trace_indir = (u8 *)ck_alloc(afl->shm.indir_map_size);
-    afl->indir_map_tmp_buf = (u8 *)ck_alloc(afl->shm.indir_map_size);
-
-    size_t top_rated_sz =
-        afl->shm.indir_map_size * 8 * sizeof(struct queue_entry *);
-    afl->indir_top_rated = (struct queue_entry **)ck_alloc(top_rated_sz);
-
-    size_t top_candidates_sz = afl->shm.indir_map_size * 8 * sizeof(u32 *);
-    afl->indir_top_rated_candidates = (u32 **)ck_alloc(top_candidates_sz);
+    }
 
   }
 
@@ -2777,6 +2773,9 @@ int main(int argc, char **argv_orig, char **envp) {
       setenv("AFL_MAP_SIZE", vbuf, 1);
 
     }
+
+    // INDIR_CHANGE: the probe may report a larger indirect map than the SHM
+    afl->fsrv.indir_map_alloc = 0;
 
     u32 new_map_size = afl_fsrv_get_mapsize(
         &afl->fsrv, afl->argv, &afl->stop_soon, afl->afl_env.afl_debug_child);
@@ -2816,72 +2815,10 @@ int main(int argc, char **argv_orig, char **envp) {
 
       if (indir_needs_resize) {
 
-        // INDIR_CHANGE: dynamically reallocate all 9 indirect buffers on size
+        // INDIR_CHANGE: dynamically reallocate all indirect buffers on size
         // negotiation
-        u32 old_indir_size = afl->shm.indir_map_size;
-        afl->indir_virgin_bits =
-            (u8 *)ck_realloc(afl->indir_virgin_bits, new_indir_map_size);
-        afl->indir_virgin_tmout =
-            (u8 *)ck_realloc(afl->indir_virgin_tmout, new_indir_map_size);
-        afl->indir_virgin_crash =
-            (u8 *)ck_realloc(afl->indir_virgin_crash, new_indir_map_size);
-        afl->indir_var_bytes =
-            (u8 *)ck_realloc(afl->indir_var_bytes, new_indir_map_size);
-        afl->clean_trace_indir =
-            (u8 *)ck_realloc(afl->clean_trace_indir, new_indir_map_size);
-        afl->baseline_trace_indir =
-            (u8 *)ck_realloc(afl->baseline_trace_indir, new_indir_map_size);
-        afl->first_trace_indir =
-            (u8 *)ck_realloc(afl->first_trace_indir, new_indir_map_size);
-        afl->indir_map_tmp_buf =
-            (u8 *)ck_realloc(afl->indir_map_tmp_buf, new_indir_map_size);
-
-        size_t top_rated_bytes =
-            new_indir_map_size * 8 * sizeof(struct queue_entry *);
-        afl->indir_top_rated = (struct queue_entry **)ck_realloc(
-            afl->indir_top_rated, top_rated_bytes);
-
-        size_t top_candidates_bytes = new_indir_map_size * 8 * sizeof(u32 *);
-        afl->indir_top_rated_candidates = (u32 **)ck_realloc(
-            afl->indir_top_rated_candidates, top_candidates_bytes);
-
-        if (new_indir_map_size > old_indir_size) {
-
-          size_t diff = new_indir_map_size - old_indir_size;
-          memset(afl->indir_virgin_bits + old_indir_size, 255, diff);
-          memset(afl->indir_virgin_tmout + old_indir_size, 255, diff);
-          memset(afl->indir_virgin_crash + old_indir_size, 255, diff);
-          memset(afl->indir_var_bytes + old_indir_size, 0, diff);
-          memset(afl->clean_trace_indir + old_indir_size, 0, diff);
-          memset(afl->baseline_trace_indir + old_indir_size, 0, diff);
-          memset(afl->first_trace_indir + old_indir_size, 0, diff);
-          memset(afl->indir_map_tmp_buf + old_indir_size, 0, diff);
-          memset(afl->indir_top_rated + old_indir_size * 8, 0,
-                 diff * 8 * sizeof(struct queue_entry *));
-          memset(afl->indir_top_rated_candidates + old_indir_size * 8, 0,
-                 diff * 8 * sizeof(u32 *));
-
-          // INDIR_CHANGE: Resize trace_mini_indir for all queued items to
-          // prevent out-of-bounds in cull_queue
-          for (u32 i = 0; i < afl->queued_items; i++) {
-
-            struct queue_entry *q = afl->queue_buf[i];
-            if (q && q->trace_mini_indir) {
-
-              q->trace_mini_indir =
-                  (u8 *)ck_realloc(q->trace_mini_indir, new_indir_map_size);
-              memset(q->trace_mini_indir + old_indir_size, 0, diff);
-
-            }
-
-          }
-
-        }
-
-        // Ensure slot 0 is permanently isolated as an ignored dummy sink
-        memset(afl->indir_virgin_bits, 0, sizeof(indir_slot_t));
-        afl->shm.indir_map_size = new_indir_map_size;
-        afl->fsrv.indir_map_size = new_indir_map_size;
+        afl_indir_resize_buffers(afl, afl->shm.indir_map_size,
+                                 new_indir_map_size);
 
       }
 
@@ -2910,6 +2847,13 @@ int main(int argc, char **argv_orig, char **envp) {
       if (needs_resize) { map_size = new_map_size; }
 
     }
+
+  }
+
+  // INDIR_CHANGE: from here on the target must fit the allocated buffers
+  if (afl->shm.indir_mode) {
+
+    afl->fsrv.indir_map_alloc = afl->shm.indir_map_size;
 
   }
 
@@ -3121,6 +3065,8 @@ int main(int argc, char **argv_orig, char **envp) {
           afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode,
                        afl->perm, afl->chown_needed ? afl->fsrv.gid : -1);
       afl->cmplog_fsrv.trace_bits = afl->fsrv.trace_bits;
+      // INDIR_CHANGE: the indirect SHM was recreated too
+      afl->fsrv.indir_bits = afl->shm.indir_map;
       // INDIR_CHANGE: CmpLog binaries do not track indirect jumps; prevent
       // memory contamination
       afl->cmplog_fsrv.indir_mode = 0;
@@ -3228,6 +3174,33 @@ int main(int argc, char **argv_orig, char **envp) {
 
     }
 
+    // INDIR_CHANGE: restore the indirect map state. The stored size can only
+    // differ with AFL_FORCE_FASTRESUME; copy what fits, the rest stays unseen.
+    u32 stored_indir_size = 0;
+    u8 *indir_tmp = NULL;
+    if (afl->shm.indir_mode) {
+
+      ZLIBREAD(fr_fd, &stored_indir_size, sizeof(stored_indir_size),
+               "indir_map_size");
+      u32 cur = afl->shm.indir_map_size;
+      u32 copy = MIN(cur, stored_indir_size);
+      u32 stored_slots = stored_indir_size / sizeof(indir_slot_t);
+      indir_tmp = ck_alloc(MAX(stored_indir_size, stored_slots * sizeof(u32)));
+
+      ZLIBREAD(fr_fd, indir_tmp, stored_indir_size, "indir_virgin_bits");
+      memcpy(afl->indir_virgin_bits, indir_tmp, copy);
+      memset(afl->indir_virgin_bits, 0, sizeof(indir_slot_t));
+      afl->indir_count_dirty = 1;
+      ZLIBREAD(fr_fd, indir_tmp, stored_indir_size, "indir_var_bytes");
+      memcpy(afl->indir_var_bytes, indir_tmp, copy);
+      ZLIBREAD(fr_fd, indir_tmp, stored_slots * sizeof(u32),
+               "indir_site_saves");
+      memcpy(afl->indir_site_saves, indir_tmp,
+             (copy / sizeof(indir_slot_t)) * sizeof(u32));
+      ZLIBREAD(fr_fd, &afl->indir_edge_desc, sizeof(u32), "indir_edge_desc");
+
+    }
+
     u8  res[1] = {0};
     u8 *o_start = (u8 *)&(afl->queue_buf[0]->colorized);
     u8 *o_end = (u8 *)&(afl->queue_buf[0]->mother);
@@ -3240,6 +3213,13 @@ int main(int argc, char **argv_orig, char **envp) {
     r = 8 + (afl->fsrv.use_ijon ? sizeof(u32) : 0) +
         queue_map_size *
             4;         /* +sizeof(u32) for map_size field only in IJON mode */
+    if (afl->shm.indir_mode) {  // INDIR_CHANGE
+
+      r += sizeof(stored_indir_size) + stored_indir_size * 2 +
+           (stored_indir_size / sizeof(indir_slot_t)) * sizeof(u32) +
+           sizeof(u32);
+
+    }
     m_len = ((queue_map_size + 7) >> 3);
 
     u32                 q_len = o_end - o_start;
@@ -3263,23 +3243,30 @@ int main(int argc, char **argv_orig, char **envp) {
 
       }
 
-      // INDIR_CHANGE: read trace_mini_indir
+      // INDIR_CHANGE: read the sparse indirect trace (see
+      // indir_trace_store()), dropping words beyond the current map
       if (afl->shm.indir_mode) {
 
-        u8 indir_res[1] = {0};
-        ZLIBREAD(fr_fd, indir_res, 1, "check indir map");
-        if (indir_res[0]) {
+        u64 n;
+        ZLIBREAD(fr_fd, &n, sizeof(n), "indir_trace count");
+        q->indir_trace = ck_alloc((1 + 2 * n) * sizeof(u64));
+        ZLIBREAD(fr_fd, q->indir_trace + 1, 2 * n * sizeof(u64), "indir_trace");
+        r += (1 + 2 * n) * sizeof(u64);
 
-          u32 indir_m_len = afl->shm.indir_map_size;
-          q->trace_mini_indir = ck_alloc(indir_m_len);
-          ZLIBREAD(fr_fd, q->trace_mini_indir, indir_m_len, "trace_mini_indir");
-          r += indir_m_len + 1;
+        u64 kept = 0;
+        for (u64 k = 0; k < n; ++k) {
 
-        } else {
+          if (q->indir_trace[1 + 2 * k] < (afl->shm.indir_map_size >> 3)) {
 
-          r += 1;
+            q->indir_trace[1 + 2 * kept] = q->indir_trace[1 + 2 * k];
+            q->indir_trace[2 + 2 * kept] = q->indir_trace[2 + 2 * k];
+            ++kept;
+
+          }
 
         }
+
+        q->indir_trace[0] = kept;
 
       }
 
@@ -3288,6 +3275,25 @@ int main(int argc, char **argv_orig, char **envp) {
       afl->total_indir_bitmap_size += q->indir_bitmap_size;
       ++afl->total_bitmap_entries;
       update_bitmap_score(afl, q, false);
+
+      // INDIR_CHANGE: rebuild indir_top_rated from the saved traces. Like the
+      // edge map here, this must not trigger a re-cull: the saved favored
+      // flags stay valid until the next find.
+      if (afl->shm.indir_mode) {
+
+        u8 score_changed = afl->score_changed;
+        q->tc_ref_indir = 0;
+        update_indir_score(afl, q);
+        afl->score_changed = score_changed;
+
+        if (q->indir_only) {
+
+          ++afl->queued_indir_only;
+          if (q->indir_edge_desc) { ++afl->indir_only_productive; }
+
+        }
+
+      }
 
       if (q->was_fuzzed) { --afl->pending_not_fuzzed; }
 
@@ -3307,6 +3313,8 @@ int main(int argc, char **argv_orig, char **envp) {
       }
 
     }
+
+    ck_free(indir_tmp);  // INDIR_CHANGE
 
     u8  buf[4];
     int trailing_bytes = NZLIBREAD(fr_fd, buf, 3);
@@ -3447,6 +3455,8 @@ int main(int argc, char **argv_orig, char **envp) {
 
         read_bitmap_offset(afl->in_bitmap, afl->indir_virgin_bits,
                            afl->fsrv.indir_map_size, afl->fsrv.map_size);
+        memset(afl->indir_virgin_bits, 0, sizeof(indir_slot_t));
+        afl->indir_count_dirty = 1;
 
       }
 
@@ -3458,14 +3468,6 @@ int main(int argc, char **argv_orig, char **envp) {
 
     memset(afl->virgin_tmout, 255, map_size);
     memset(afl->virgin_crash, 255, map_size);
-    // INDIR_CHANGE: indir virgin map
-    if (afl->shm.indir_mode) {
-
-      memset(afl->indir_virgin_tmout, 255, afl->shm.indir_map_size);
-      memset(afl->indir_virgin_crash, 255, afl->shm.indir_map_size);
-
-    }
-
     if (likely(!afl->afl_env.afl_no_startup_calibration)) {
 
       perform_dry_run(afl);
@@ -4103,7 +4105,8 @@ stop_fuzzing:
       *ver = FAST_RESUME_VERSION + afl->shm.cmplog_mode +
              (sizeof(struct queue_entry) << 1) +
              (afl->fsrv.use_ijon ? sizeof(u32) + sizeof(ijon_fastresume_state_t)
-                                 : 0);
+                                 : 0) +
+             ((u64)!!afl->shm.indir_mode << 32);  // INDIR_CHANGE
 
       ZLIBWRITE(fr_fd, ver_string, sizeof(ver_string), "ver_string");
 
@@ -4154,6 +4157,23 @@ stop_fuzzing:
       w += sizeof(ver_string) + (afl->fsrv.use_ijon ? sizeof(u32) : 0) +
            afl->fsrv.map_size * 4;
 
+      // INDIR_CHANGE: persist the indirect map state, prefixed by its size
+      if (afl->shm.indir_mode) {
+
+        u32 indir_size = afl->shm.indir_map_size;
+        ZLIBWRITE(fr_fd, &indir_size, sizeof(indir_size), "indir_map_size");
+        ZLIBWRITE(fr_fd, afl->indir_virgin_bits, indir_size,
+                  "indir_virgin_bits");
+        ZLIBWRITE(fr_fd, afl->indir_var_bytes, indir_size, "indir_var_bytes");
+        ZLIBWRITE(fr_fd, afl->indir_site_saves,
+                  (indir_size / sizeof(indir_slot_t)) * sizeof(u32),
+                  "indir_site_saves");
+        ZLIBWRITE(fr_fd, &afl->indir_edge_desc, sizeof(u32), "indir_edge_desc");
+        w += sizeof(indir_size) + indir_size * 2 +
+             (indir_size / sizeof(indir_slot_t)) * sizeof(u32) + sizeof(u32);
+
+      }
+
       u8                  on[1] = {1}, off[1] = {0};
       u8                 *o_start = (u8 *)&(afl->queue_buf[0]->colorized);
       u8                 *o_end = (u8 *)&(afl->queue_buf[0]->mother);
@@ -4181,23 +4201,13 @@ stop_fuzzing:
 
         }
 
-        // INDIR_CHANGE: save trace_mini_indir
+        // INDIR_CHANGE: save the sparse indirect trace (count 0 if none)
         if (afl->shm.indir_mode) {
 
-          u32 indir_m_len = afl->shm.indir_map_size;
-          if (!q->trace_mini_indir) {
-
-            ZLIBWRITE(fr_fd, off, 1, "no_indir_mini");
-            w += 1;
-
-          } else {
-
-            ZLIBWRITE(fr_fd, on, 1, "yes_indir_mini");
-            ZLIBWRITE(fr_fd, q->trace_mini_indir, indir_m_len,
-                      "trace_mini_indir");
-            w += indir_m_len + 1;
-
-          }
+          u64 zero = 0;
+          u64 *t = q->indir_trace ? q->indir_trace : &zero;
+          ZLIBWRITE(fr_fd, t, (1 + 2 * t[0]) * sizeof(u64), "indir_trace");
+          w += (1 + 2 * t[0]) * sizeof(u64);
 
         }
 

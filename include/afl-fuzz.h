@@ -275,7 +275,9 @@ struct queue_entry {
       favored,                          /* Currently favored?               */
       fs_redundant,                     /* Marked as redundant in the fs?   */
       is_ascii,                         /* Is the input just ascii text?    */
-      disabled;                         /* Is disabled from fuzz selection  */
+      disabled,                         /* Is disabled from fuzz selection  */
+      // INDIR_CHANGE
+      indir_only;                       /* Saved for indirect novelty only  */
 
   u32 bitmap_size,                      /* Number of bits set in bitmap     */
       // INDIR_CHANGE
@@ -302,6 +304,9 @@ struct queue_entry {
   u32 tc_ref;                           /* Trace bytes ref count            */
   // INDIR_CHANGE: new param for indir stuff
   u32 tc_ref_indir;                     /* Indirect trace bytes ref count   */
+  // INDIR_CHANGE: for indir_only entries, number of descendants that found
+  // new edge coverage
+  u32 indir_edge_desc;
 
 #ifdef INTROSPECTION
   u32 bitsmap_size;
@@ -312,8 +317,8 @@ struct queue_entry {
 
   struct queue_entry *mother;           /* queue entry this based on        */
   u8                 *trace_mini;       /* Trace bytes, if kept             */
-  // INDIR_CHANGE: same as above, but indir
-  u8             *trace_mini_indir;     /* Indirect trace bytes, if kept    */
+  // INDIR_CHANGE: sparse indirect trace, see indir_trace_store()
+  u64            *indir_trace;          /* [n, (word idx, word) * n]        */
   u8             *testcase_buf;         /* The testcase buffer, if loaded.  */
   u8             *cmplog_colorinput;    /* the result buf of colorization   */
   struct tainted *taint;                /* Taint information from CmpLog    */
@@ -572,15 +577,19 @@ typedef struct afl_state {
   // INDIR_CHANGE: indirect coverage state and buffers
   u8 *indir_trace_bits;
   u8 *indir_virgin_bits;
-  u8 *indir_virgin_tmout;
-  u8 *indir_virgin_crash;
   u8 *indir_var_bytes;   /* Variable bitmask for fluctuating indirect slots */
   u8 *clean_trace_indir; /* Snapshot buffer for restoring trace after trimming
                           */
-  u8 *baseline_trace_indir; /* Baseline snapshot buffer for trimming subset
-                               check */
   u8 *first_trace_indir; /* Initial trace buffer for calibration comparison */
   u8 *indir_map_tmp_buf;   /* Static reusable working buffer for cull_queue */
+  u32 *indir_site_saves;   /* Indirect-only saves per site (slot)           */
+  u32  indir_max_per_site; /* Cap for indir_site_saves, 0 = no cap          */
+  u32  queued_indir_only,  /* Queue entries saved for indirect novelty only */
+      indir_only_productive, /* indir_only entries with edge-novel children */
+      indir_edge_desc;     /* Edge-novel finds with an indir_only ancestor  */
+  bool indir_only_find;    /* describe_op(): current find is indir_only     */
+  bool indir_count_dirty;  /* indir_count_cache must be recomputed          */
+  u32  indir_count_cache;  /* Cached count_indir_bits() result              */
 
   /* Position of this state in the global states list */
   u32 _id;
@@ -1317,7 +1326,9 @@ void recalculate_all_scores(afl_state_t *);
 void update_bitmap_rescore(afl_state_t *, struct queue_entry *, u32);
 // INDIR_CHANGE: New functions for indir bitmap scoring
 void update_bitmap_indir_rescore(afl_state_t *, struct queue_entry *, u32);
-void minimize_indir_bits(afl_state_t *afl, u8 *dst, u8 *src);
+void indir_trace_store(afl_state_t *, struct queue_entry *);
+void update_indir_score(afl_state_t *, struct queue_entry *);
+void afl_indir_resize_buffers(afl_state_t *, u32, u32);
 
 /* Bitmap */
 
@@ -1342,8 +1353,19 @@ u8 *describe_op(afl_state_t *, u8, size_t);
 u8 save_if_interesting(afl_state_t *, void *, u32, u8);
 u8 has_new_bits(afl_state_t *, u8 *);
 // INDIR_CHANGE: novelty checks for indirect coverage
-u8 has_indir_new_bits_map(afl_state_t *, u8 *);
-u8 check_indir_new_bits_map(afl_state_t *, const u8 *);
+u8  has_indir_new_bits_map(afl_state_t *, u8 *);
+u8  check_indir_new_bits_map(afl_state_t *, const u8 *);
+u64  hash_indir_trace(afl_state_t *);
+bool indir_trace_unchanged(afl_state_t *, struct queue_entry *);
+
+/* INDIR_CHANGE: n_fuzz path id. With the indirect map it combines both
+   checksums, so that entries with the same edge path but different indirect
+   behaviour get their own path frequency counter. */
+static inline u32 indir_path_id(afl_state_t *afl, u64 cksum, u64 indir_cksum) {
+
+  return (afl->shm.indir_mode ? cksum ^ indir_cksum : cksum) % N_FUZZ_SIZE;
+
+}
 #ifndef AFL_SHOWMAP
 void classify_counts(afl_forkserver_t *);
 #endif

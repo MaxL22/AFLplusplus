@@ -3650,6 +3650,33 @@ static u8 file_contains_ijon_usage(const char *source_file) {
 }
 
 /* Process each of the existing argv, also add a few new args. */
+/*
+  INDIR_CHANGE: only SanitizerCoveragePCGUARD.so emits the indirect map. In
+  every other mode AFL_LLVM_INDIRECT would be silently ignored, and the fuzzer
+  would run with an empty indirect map, so say it loudly.
+*/
+static void check_indirect_mode(aflcc_state_t *aflcc) {
+
+  if (!aflcc->instrument_indir) { return; }
+
+  if ((aflcc->compiler_mode == LLVM || aflcc->compiler_mode == LTO) &&
+      !aflcc->lto_mode && aflcc->instrument_mode == INSTRUMENT_PCGUARD &&
+      !getenv("AFL_LLVM_ONLY_FSRV")) {
+
+    if (!be_quiet) { OKF("AFL_LLVM_INDIRECT is set"); }
+    return;
+
+  }
+
+  WARNF(
+      "AFL_LLVM_INDIRECT is set but the %s instrumentation mode does not "
+      "support it, NO indirect branches/calls will be tracked. Only the LLVM "
+      "PCGUARD mode (afl-clang-fast, AFL_LLVM_INSTRUMENT=PCGUARD) does.",
+      aflcc->lto_mode ? (u8 *)"LTO"
+                      : instrument_mode_2str(aflcc->instrument_mode));
+
+}
+
 static void edit_params(aflcc_state_t *aflcc, u32 argc, char **argv,
                         char **envp) {
 
@@ -3669,6 +3696,13 @@ static void edit_params(aflcc_state_t *aflcc, u32 argc, char **argv,
   }
 
   if (aflcc->compiler_mode == GCC_PLUGIN) { add_gcc_plugin(aflcc); }
+
+  // INDIR_CHANGE: no indirect instrumentation outside of LLVM PCGUARD
+  if (aflcc->compiler_mode != LLVM && aflcc->compiler_mode != LTO) {
+
+    check_indirect_mode(aflcc);
+
+  }
 
   if (aflcc->compiler_mode == LLVM || aflcc->compiler_mode == LTO) {
 
@@ -3818,15 +3852,8 @@ static void edit_params(aflcc_state_t *aflcc, u32 argc, char **argv,
 
     }
 
-    // INDIR_CHANGE Here
-    // Da modificare quando effettivamente esisterà il pass?
-    // Esisterà un pass?
-    if (aflcc->instrument_indir) {
-
-      OKF("AFL_LLVM_INDIRECT is set");
-      // load_llvm_pass(aflcc, "afl-llvm-instr-pass.so");
-
-    }
+    // INDIR_CHANGE: the indirect map is emitted by SanitizerCoveragePCGUARD.so
+    check_indirect_mode(aflcc);
 
   }
 

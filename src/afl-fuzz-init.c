@@ -943,7 +943,8 @@ void perform_dry_run(afl_state_t *afl) {
     if (unlikely(afl->schedule >= FAST && afl->schedule <= RARE) &&
         likely(q->exec_cksum)) {
 
-      q->n_fuzz_entry = q->exec_cksum % N_FUZZ_SIZE;
+      // INDIR_CHANGE: same path id as for finds
+      q->n_fuzz_entry = indir_path_id(afl, q->exec_cksum, q->indir_cksum);
 
     }
 
@@ -3303,6 +3304,19 @@ void check_binary(afl_state_t *afl, u8 *fname) {
   if (afl_memmem(f_data, f_len, "__msan_init", 11)) {
 
     afl->fsrv.uses_asan |= 4;
+
+  }
+
+  // INDIR_CHANGE: an indirect-instrumented target fuzzed without
+  // AFL_LLVM_INDIRECT runs fine, but its indirect map is never read
+  if (!getenv("AFL_LLVM_INDIRECT") &&
+      (!afl->cmplog_binary || strcmp(fname, afl->cmplog_binary)) &&
+      afl_memmem(f_data, f_len, "__sancov_indir_guards", 21)) {
+
+    WARNF(
+        "The target has indirect branch instrumentation but AFL_LLVM_INDIRECT "
+        "is not set, so the indirect map is ignored. Set AFL_LLVM_INDIRECT=1 "
+        "for afl-fuzz to use it.");
 
   }
 

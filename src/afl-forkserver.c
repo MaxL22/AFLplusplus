@@ -1019,10 +1019,12 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
       unsetenv(CMPLOG_SHM_ENV_VAR);  // we do not want that in non-cmplog fsrv
 
-    } else {
+    }
 
-      // INDIR_CHANGE: prevent cmplog child from inheriting indirect SHM
-      // environment
+    // INDIR_CHANGE: only the main forkserver owns the indirect SHM; cmplog
+    // and SAND children must not write into it
+    if (!fsrv->indir_mode) {
+
       unsetenv(INDIR_SHM_ENV_VAR);
       unsetenv(INDIR_MAP_SIZE_ENV_VAR);
 
@@ -1300,10 +1302,32 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
         }
 
+        if (tmp_indir_map_size % 64)
+          tmp_indir_map_size =
+              (((tmp_indir_map_size + 63) >> 6) << 6);  // align to 64 bit
+
+        // INDIR_CHANGE: never let the target size exceed the fuzzer's
+        // buffers. Outside the startup probe (e.g. AFL_SKIP_BIN_CHECK) there
+        // is no renegotiation, and the target would record into a dummy map.
+        if (fsrv->indir_map_alloc &&
+            tmp_indir_map_size > fsrv->indir_map_alloc) {
+
+          FATAL(
+              "The target needs a %u byte indirect map but only %u bytes are "
+              "allocated. Set AFL_INDIR_MAP_SIZE=%u and restart afl-fuzz.",
+              tmp_indir_map_size, fsrv->indir_map_alloc, tmp_indir_map_size);
+
+        }
+
         fsrv->indir_map_size = tmp_indir_map_size;
-        if (fsrv->indir_map_size % 64)
-          fsrv->indir_map_size =
-              (((fsrv->indir_map_size + 63) >> 6) << 6);  // align to 64 bit
+
+      } else if (fsrv->indir_mode) {
+
+        // INDIR_CHANGE: AFL_LLVM_INDIRECT is set but nothing was reported
+        WARNF(
+            "AFL_LLVM_INDIRECT is set but the target has no indirect "
+            "instrumentation: build it with AFL_LLVM_INDIRECT=1 in LLVM "
+            "PCGUARD mode (afl-clang-fast). The indirect map stays empty.");
 
       }
 
@@ -2225,14 +2249,14 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
     MEM_BARRIER();
 #endif
 
-    // INDIR_CHANGE: zero only active bytes of the indirect map
+    // INDIR_CHANGE: zero only active bytes of the indirect map (the barrier
+    // is only needed when something was written)
     if (fsrv->indir_mode && fsrv->indir_bits && fsrv->indir_map_size > 0) {
 
       memset(fsrv->indir_bits, 0, fsrv->indir_map_size);
+      MEM_BARRIER();
 
     }
-
-    MEM_BARRIER();
 
   }
 
